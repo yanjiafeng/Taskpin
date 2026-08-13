@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>卡片样式 Demos · Taskpin</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", sans-serif; background: #0b0e17; color: #dfe5f2;
+         min-height: 100vh; padding: 40px 24px; }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  p.sub { color: #7a84a0; font-size: 13px; margin-bottom: 28px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; max-width: 1100px; }
+  a.item { display: block; text-decoration: none; color: inherit; border: 1px solid #232a3d;
+           border-radius: 14px; padding: 20px; background: #121627; transition: transform .15s, border-color .15s; }
+  a.item:hover { transform: translateY(-3px); border-color: #3d4a6e; }
+  a.item h2 { font-size: 16px; margin-bottom: 6px; }
+  a.item p { font-size: 12.5px; color: #8a93b0; line-height: 1.6; }
+  a.item .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<h1>Demos · Taskpin</h1>
+<p class="sub">浏览器直接打开对比。上排：卡片样式 4 方向（C 终端 HUD 已选定并落地，含亮色主题）。下排：任务详情页布局 3 方案（C 已选定并落地）。</p>
+<div class="grid">
+  <a class="item" href="./cards-a-neon.html">
+    <h2><span class="sw" style="background:#00e5ff"></span>A · 霓虹科技 Neon Pulse</h2>
+    <p>深色底 + 状态色霓虹描边；执行中卡片脉冲呼吸 + 顶部扫描线。最「炫酷」，信息密度中等。</p>
+  </a>
+  <a class="item" href="./cards-b-glass.html">
+    <h2><span class="sw" style="background:#8b5cf6"></span>B · 玻璃拟态 Glass Orbit</h2>
+    <p>极光渐变底 + 磨砂玻璃卡片；执行中卡片边缘旋转流光（conic-gradient）。曾落地，后被 C 取代。</p>
+  </a>
+  <a class="item" href="./cards-c-hud.html">
+    <h2><span class="sw" style="background:#5cff9d"></span>C · 终端 HUD Cyberterm ✓ 已选定</h2>
+    <p>等宽字体 + 切角 + CRT 扫描线；执行中边框呼吸 + 字符光标闪烁。已落地到正式 style.css（含亮色主题）。</p>
+  </a>
+  <a class="item" href="./cards-d-linear.html">
+    <h2><span class="sw" style="background:#58a6ff"></span>D · 极简现代 Linear-ish</h2>
+    <p>Linear / GitHub Projects 主流参考系：深色极简、细 hairline 进度流光。克制耐看，落地风险最低。</p>
+  </a>
+</div>
+<h1 style="margin-top:36px">执行中卡片 Demos（当前软木板主题）</h1>
+<p class="sub">在已落地的软木板/便利贴主题上设计「执行中」卡片的多种处理，选定后落到正式 style.css。</p>
+<div class="grid">
+  <a class="item" href="./running-cards-cork.html">
+    <h2><span class="sw" style="background:#d93a2b"></span>执行中卡片 × 10 变体 · 软木板主题</h2>
+    <p>图钉呼吸 / 缝线流动 ✓ / 胶带进度条 / 执行中印章 / 图钉悬摆 / 图钉吊牌 ✓ / 荧光笔扫过 / 手写省略号 / 卷角呼吸 / 心跳缩放。「缝线流动 + 图钉吊牌」已选定并落地到正式 style.css（同时移除了卡片级执行/删除按钮，操作集中在任务详情抽屉）。</p>
+  </a>
+</div>
+<h1 style="margin-top:36px">任务详情页布局 Demos</h1>
+<p class="sub">按使用习惯设计：左侧或中间查看 / 打开先见最新评论 / 大输入框 / 发布评论后一键执行。选定后落到正式页面。</p>
+<div class="grid">
+  <a class="item" href="./layout-a-left-drawer.html">
+    <h2><span class="sw" style="background:#2563eb"></span>A · 左侧抽屉 评论优先</h2>
+    <p>详情从左侧滑出（560px）：最新评论置顶高亮 → 历史评论 → 属性折叠；底部大输入框，「发布评论」与「▶ 执行/问答」相邻。改动最小，保留抽屉形态。</p>
+  </a>
+  <a class="item" href="./layout-b-center-modal.html">
+    <h2><span class="sw" style="background:#8b5cf6"></span>B · 居中宽模态 评论流</h2>
+    <p>居中 720px 模态：属性收成一行横条，第一屏 = 最新评论 + 大输入框 + 执行按钮，视线零移动。信息最聚焦，移动端天然适配。</p>
+  </a>
+  <a class="item" href="./layout-c-left-split.html">
+    <h2><span class="sw" style="background:#0891b2"></span>C · 左侧双栏 属性+评论 ✓ 已选定</h2>
+    <p>左侧宽抽屉（880px）内部分栏：左栏属性/描述/流转，右栏评论流（最新置顶 + 大输入框 + 执行相邻）。已落地（执行输出按指示改到任务卡片弹框）。</p>
+  </a>
+</div>
+</body>
+</html>

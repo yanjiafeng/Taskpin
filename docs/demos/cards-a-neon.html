@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo A · 霓虹科技 Neon Pulse</title>
+<style>
+  /* Demo A：霓虹科技风 —— 深色底 + 状态色霓虹描边，执行中脉冲呼吸 + 扫描线 */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+    background: #05060e radial-gradient(ellipse 80% 50% at 50% -10%, rgba(0,229,255,.08), transparent);
+    background-color: #05060e;
+    color: #d7e0f4;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 700; letter-spacing: .5px;
+       background: linear-gradient(90deg, #00e5ff, #7c6cff);
+       -webkit-background-clip: text; background-clip: text; color: transparent; }
+  header small { color: #5a6480; font-size: 12px; }
+
+  .board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 12px; }
+  .col { flex: 0 0 240px; background: rgba(255,255,255,.025); border: 1px solid rgba(255,255,255,.06);
+         border-radius: 14px; padding: 12px; }
+  .col h2 { font-size: 12px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase;
+            color: #8b95b5; margin-bottom: 10px; display: flex; gap: 8px; align-items: center; }
+  .col h2 .n { margin-left: auto; font-size: 11px; color: #4a5268; background: rgba(255,255,255,.05);
+               border-radius: 99px; padding: 1px 8px; }
+  .col h2 .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .cards { display: flex; flex-direction: column; gap: 10px; }
+
+  /* 卡片基座：玻璃底 + 状态色霓虹左边条 */
+  .card {
+    --c: #566; /* 状态色 */
+    position: relative;
+    background: linear-gradient(160deg, rgba(255,255,255,.05), rgba(255,255,255,.015));
+    border: 1px solid color-mix(in srgb, var(--c) 35%, transparent);
+    border-left: 2px solid var(--c);
+    border-radius: 10px;
+    padding: 11px 12px 9px;
+    cursor: pointer;
+    transition: transform .15s, box-shadow .15s, border-color .15s;
+  }
+  .card:hover { transform: translateY(-2px);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--c) 55%, transparent),
+                0 6px 24px -6px color-mix(in srgb, var(--c) 45%, transparent); }
+  .title { font-size: 14px; font-weight: 600; line-height: 1.4; display: flex; gap: 7px; align-items: flex-start; }
+  .prio { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; background: #4a5268; }
+  .prio.high { background: #ff5d7a; box-shadow: 0 0 8px #ff5d7a; }
+  .meta { margin-top: 8px; display: flex; align-items: center; gap: 8px; font-size: 11px; color: #6a7492; }
+  .meta .spacer { flex: 1; }
+  .badge { font-size: 10px; padding: 1px 7px; border-radius: 99px;
+           border: 1px solid color-mix(in srgb, var(--c) 50%, transparent);
+           color: color-mix(in srgb, var(--c) 80%, #fff); }
+
+  /* 各状态色 */
+  .col[data-s="backlog"] .card, .dot.backlog { --c: #5b6b8c; }
+  .col[data-s="todo"] .card, .dot.todo { --c: #4c8dff; }
+  .col[data-s="in_progress"] .card, .dot.in_progress { --c: #00e5ff; }
+  .col[data-s="blocked"] .card, .dot.blocked { --c: #ffb02e; }
+  .col[data-s="in_review"] .card, .dot.in_review { --c: #b06cff; }
+  .col[data-s="done"] .card, .dot.done { --c: #2ee6a8; }
+
+  /* 执行中：呼吸脉冲 + 顶部扫描线 */
+  .card.running {
+    border-color: rgba(0,229,255,.65);
+    box-shadow: 0 0 18px -4px rgba(0,229,255,.55), inset 0 0 24px -12px rgba(0,229,255,.5);
+    animation: pulse 2.2s ease-in-out infinite;
+    overflow: hidden;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 14px -4px rgba(0,229,255,.4), inset 0 0 24px -12px rgba(0,229,255,.4); }
+    50% { box-shadow: 0 0 26px -2px rgba(0,229,255,.75), inset 0 0 30px -10px rgba(0,229,255,.7); }
+  }
+  .card.running::after {
+    content: ''; position: absolute; left: 0; right: 0; top: -30%; height: 30%;
+    background: linear-gradient(180deg, transparent, rgba(0,229,255,.14), transparent);
+    animation: scan 2.6s linear infinite;
+  }
+  @keyframes scan { to { top: 130%; } }
+  .agent-line { display: flex; align-items: center; gap: 6px; margin-top: 8px;
+    font-family: ui-monospace, monospace; font-size: 11px; color: #00e5ff; }
+  .spinner { width: 10px; height: 10px; border: 2px solid rgba(0,229,255,.3);
+             border-top-color: #00e5ff; border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .stop-btn { margin-left: auto; border: 1px solid rgba(255,93,122,.5); background: transparent;
+              color: #ff5d7a; border-radius: 6px; font-size: 10px; padding: 2px 8px; cursor: pointer; }
+  .term { margin-top: 8px; font-family: ui-monospace, monospace; font-size: 10px; line-height: 1.5;
+          color: #4de3c2; background: rgba(0,0,0,.35); border: 1px solid rgba(0,229,255,.18);
+          border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; }
+
+  /* 异常退出：红色告警 */
+  .card.failed { --c: #ff3b5c; border-color: rgba(255,59,92,.6);
+    background: linear-gradient(160deg, rgba(255,59,92,.12), rgba(255,59,92,.03));
+    box-shadow: 0 0 16px -6px rgba(255,59,92,.6); }
+  .fail-tag { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;
+    font-size: 10px; font-weight: 700; letter-spacing: 1px; color: #ff6b85;
+    border: 1px solid rgba(255,59,92,.5); border-radius: 5px; padding: 2px 7px;
+    background: rgba(255,59,92,.12); }
+
+  .q-badge { font-size: 10px; color: #ffb02e; border: 1px solid rgba(255,176,46,.5);
+             border-radius: 99px; padding: 1px 7px; }
+</style>
+</head>
+<body>
+<header><h1>Demo A · 霓虹科技 Neon Pulse</h1><small>深色底 / 状态色霓虹描边 / 执行中脉冲+扫描线</small></header>
+<div class="board">
+
+  <section class="col" data-s="backlog">
+    <h2><span class="dot backlog" style="--c:#5b6b8c;background:var(--c)"></span>待规划<span class="n">2</span></h2>
+    <div class="cards">
+      <div class="card">
+        <div class="title"><span class="prio high"></span>看板支持多语言切换</div>
+        <div class="meta"><span>#21</span><span class="spacer"></span><span>💬 3</span></div>
+      </div>
+      <div class="card failed">
+        <div class="title"><span class="prio"></span>导出看板为 Markdown</div>
+        <div class="meta"><span>#19</span><span class="spacer"></span></div>
+        <span class="fail-tag">⚠ 异常退出 · 码 1</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="todo">
+    <h2><span class="dot todo" style="--c:#4c8dff;background:var(--c)"></span>待办<span class="n">2</span></h2>
+    <div class="cards">
+      <div class="card">
+        <div class="title"><span class="prio"></span>评论支持 Markdown 渲染</div>
+        <div class="meta"><span>#22</span><span class="spacer"></span><span class="badge">REST</span></div>
+      </div>
+      <div class="card">
+        <div class="title"><span class="prio high"></span>任务搜索与过滤</div>
+        <div class="meta"><span>#23</span><span class="spacer"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="in_progress">
+    <h2><span class="dot in_progress" style="--c:#00e5ff;background:var(--c)"></span>进行中<span class="n">1</span></h2>
+    <div class="cards">
+      <div class="card running">
+        <div class="title"><span class="prio"></span>需求优化 · 卡片样式重设计</div>
+        <div class="agent-line"><span class="spinner"></span>kimi · 3:42<button class="stop-btn">■ 停止</button></div>
+        <div class="term">▸ reading server/runner.mjs…
+▸ thinking: 输出缓冲改环形…</div>
+        <div class="meta"><span>#16</span><span class="spacer"></span><span>💬 5</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="blocked">
+    <h2><span class="dot blocked" style="--c:#ffb02e;background:var(--c)"></span>阻塞<span class="n">1</span></h2>
+    <div class="cards">
+      <div class="card">
+        <div class="title"><span class="prio"></span>接入第三方登录</div>
+        <div class="meta"><span>#17</span><span class="q-badge">等你答复</span><span class="spacer"></span><span>💬 2</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="in_review">
+    <h2><span class="dot in_review" style="--c:#b06cff;background:var(--c)"></span>待验收<span class="n">1</span></h2>
+    <div class="cards">
+      <div class="card">
+        <div class="title"><span class="prio"></span>隧道断线自动重连</div>
+        <div class="meta"><span>#15</span><span class="spacer"></span><span>💬 4</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="done">
+    <h2><span class="dot done" style="--c:#2ee6a8;background:var(--c)"></span>已完成<span class="n">1</span></h2>
+    <div class="cards">
+      <div class="card" style="opacity:.75">
+        <div class="title"><span class="prio"></span>评论图片附件</div>
+        <div class="meta"><span>#12</span><span class="spacer"></span><span>✓</span></div>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

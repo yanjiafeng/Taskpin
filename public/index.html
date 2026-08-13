@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#c89866">
+  <title>Taskpin</title>
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <script>document.documentElement.dataset.theme = localStorage.getItem('taskboard_theme') || 'light';</script>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand"><img class="brand-icon" src="/icon.svg" alt=""> Taskpin</div>
+    <select id="project-select" aria-label="选择项目"></select>
+    <button id="quota-btn" class="btn ghost" title="额度（DeepSeek / Kimi / Codex）">💰</button>
+    <button id="share-btn" class="btn ghost hidden" title="公网分享">🌐</button>
+    <button id="settings-btn" class="btn ghost" title="设置">⚙</button>
+  </header>
+
+  <section id="quota-bar" class="hidden" aria-label="额度">
+    <div class="quota-head">
+      <span class="quota-title">额度</span>
+      <span class="quota-time" id="quota-time"></span>
+      <button class="btn ghost" id="quota-refresh" title="刷新">↻</button>
+      <button class="btn ghost" id="quota-close" title="隐藏">×</button>
+    </div>
+    <div id="quota-cards"></div>
+  </section>
+
+  <main id="board" aria-label="任务看板"></main>
+
+  <main id="settings-page" class="hidden" aria-label="设置">
+    <div class="settings-head">
+      <h1>设置</h1>
+      <button class="close" id="settings-close" title="返回看板">×</button>
+    </div>
+    <section class="settings-block">
+      <h2>项目</h2>
+      <div id="settings-projects"></div>
+      <button class="btn ghost" id="sp-new-project">＋ 新建项目</button>
+    </section>
+    <section class="settings-block">
+      <h2>Agent</h2>
+      <label class="toggle-canceled"><input type="checkbox" data-agent-toggle="codex"> Codex</label>
+      <label class="toggle-canceled"><input type="checkbox" data-agent-toggle="kimi"> Kimi</label>
+      <label class="toggle-canceled"><input type="checkbox" data-agent-toggle="reasonix"> Reasonix</label>
+      <div class="settings-hint">停用后执行面板不再显示对应按钮；至少启用一个</div>
+    </section>
+    <section class="settings-block">
+      <h2>显示</h2>
+      <label class="toggle-canceled">
+        <input type="checkbox" id="toggle-canceled"> 在看板上显示「已取消」任务
+      </label>
+      <button id="theme-btn" class="btn ghost" title="切换主题">☀️ 切换为亮色</button>
+    </section>
+    <section class="settings-block">
+      <h2>执行提示词模板</h2>
+      <div class="settings-hint">看板拉起 Agent 时使用的提示词。占位符：<code>{{task_id}}</code> <code>{{tctl}}</code> <code>{{project_name}}</code> <code>{{scope}}</code> <code>{{claim_step}}</code>（续跑模板只用前两个）。清空或点「恢复默认」回到内置版本。</div>
+      <label class="prompt-label">新会话模板</label>
+      <textarea id="prompt-new" class="prompt-tpl" rows="14" spellcheck="false"></textarea>
+      <label class="prompt-label">续跑模板</label>
+      <textarea id="prompt-resume" class="prompt-tpl" rows="10" spellcheck="false"></textarea>
+      <label class="prompt-label">问答模板（只讨论不实现；待规划/待办/阻塞可发起）</label>
+      <textarea id="prompt-qa" class="prompt-tpl" rows="12" spellcheck="false"></textarea>
+      <div class="prompt-actions">
+        <button class="btn primary" id="prompt-save">保存模板</button>
+        <button class="btn ghost" id="prompt-reset">恢复默认</button>
+      </div>
+    </section>
+    <section class="settings-block">
+      <h2>自动认领提示词</h2>
+      <div class="settings-hint">复制后贴给一个常驻的 Agent 会话（终端里运行的 codex / kimi / reasonix），它会循环认领「待办」任务逐个执行。</div>
+      <textarea id="auto-claim-prompt" class="prompt-tpl" rows="14" readonly spellcheck="false"></textarea>
+      <div class="prompt-actions">
+        <button class="btn primary" id="auto-claim-copy">复制提示词</button>
+      </div>
+    </section>
+    <section class="settings-block">
+      <h2>访问 Token</h2>
+      <div class="token-row">
+        <code id="token-view">（未设置）</code>
+        <button id="token-btn" class="btn ghost">修改</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="drawer-backdrop" class="hidden"></div>
+  <aside id="drawer" class="hidden" aria-label="任务详情"></aside>
+
+  <div id="modal-backdrop" class="hidden">
+    <form id="task-form" class="modal">
+      <h2 id="task-form-title">新建任务</h2>
+      <input type="hidden" id="tf-status">
+      <label>项目<select id="tf-project"></select></label>
+      <label>标题<input id="tf-title-input" required maxlength="200" placeholder="要做什么？"></label>
+      <label>描述<textarea id="tf-desc" rows="4" placeholder="背景、验收条件…"></textarea></label>
+      <label>优先级
+        <select id="tf-priority">
+          <option value="low">低</option>
+          <option value="normal" selected>普通</option>
+          <option value="high">高</option>
+        </select>
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" id="tf-cancel">取消</button>
+        <button type="submit" class="btn primary">创建</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="project-backdrop" class="hidden">
+    <form id="project-form" class="modal">
+      <h2 id="pf-title">新建项目</h2>
+      <input type="hidden" id="pf-id">
+      <label>名称<input id="pf-name" required maxlength="100" placeholder="项目名"></label>
+      <label>主目录（Agent 的工作目录，留空默认 ~/项目名，不存在会自动创建）<input id="pf-maindir" maxlength="300" placeholder="留空使用默认"></label>
+      <label>本地仓库路径（Agent 的查找范围，可多个，不限于此）</label>
+      <div id="pf-paths"></div>
+      <button type="button" class="btn ghost" id="pf-add-path">＋ 添加路径</button>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" id="pf-cancel">取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="run-backdrop" class="hidden">
+    <div class="run-sheet">
+      <h2>立即执行</h2>
+      <p id="run-task-title" class="run-task-title"></p>
+      <div class="run-mode" id="run-mode">
+        <button type="button" class="active" data-rmode="execute">⚡ 执行</button>
+        <button type="button" data-rmode="qa">💬 问答</button>
+      </div>
+      <div id="run-hint" class="run-hint hidden"></div>
+      <label class="run-opt">模型<input id="run-model" maxlength="100" placeholder="默认（读 CLI 配置）"></label>
+      <label class="run-opt">思考（Kimi 不生效）
+        <select id="run-effort">
+          <option value="" selected>默认</option>
+          <option value="low">低</option>
+          <option value="medium">中</option>
+          <option value="high">高</option>
+        </select>
+      </label>
+      <label class="run-opt">权限（Codex / Reasonix 生效）
+        <select id="run-permission">
+          <option value="" selected>默认（工作区可写）</option>
+          <option value="read-only">只读</option>
+          <option value="workspace-write">工作区可写</option>
+          <option value="danger-full-access">完全开放</option>
+        </select>
+      </label>
+      <button class="btn primary run-agent" data-agent="codex">▶ Codex 执行</button>
+      <button class="btn primary run-agent" data-agent="kimi">▶ Kimi 执行</button>
+      <button class="btn primary run-agent" data-agent="reasonix">▶ Reasonix 执行</button>
+      <button class="btn ghost" id="run-cancel">取消</button>
+    </div>
+  </div>
+
+  <div id="share-backdrop" class="hidden">
+    <div class="dlg share-dlg" role="dialog" aria-modal="true">
+      <h2>公网访问</h2>
+      <p class="settings-hint">通过 cloudflared 快速隧道把看板暴露到公网。链接含 Token，拿到的人即可操作看板，注意保密。</p>
+      <div id="share-status" class="settings-hint"></div>
+      <label class="share-label">外网地址</label>
+      <code id="share-url" class="share-value"></code>
+      <label class="share-label">访问 Token</label>
+      <code id="share-token" class="share-value"></code>
+      <div class="dlg-actions">
+        <button class="btn ghost" id="share-close">关闭</button>
+        <button class="btn ghost hidden" id="share-stop">停止</button>
+        <button class="btn ghost hidden" id="share-regen">重新生成</button>
+        <button class="btn primary hidden" id="share-start">开始分享</button>
+        <button class="btn primary" id="share-copy">复制完整链接</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dlg-backdrop" class="hidden">
+    <div class="dlg" role="dialog" aria-modal="true">
+      <p id="dlg-msg"></p>
+      <input id="dlg-input" class="hidden" maxlength="200">
+      <div class="dlg-actions">
+        <button class="btn ghost" id="dlg-cancel">取消</button>
+        <button class="btn primary" id="dlg-ok">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden" role="alert"></div>
+
+  <div id="output-backdrop" class="hidden">
+    <div class="output-modal" role="dialog" aria-modal="true" aria-label="执行输出">
+      <div class="output-head">
+        <span id="output-title">执行输出</span>
+        <button class="close" id="output-close" title="关闭">×</button>
+      </div>
+      <pre class="output-term" id="output-term"></pre>
+    </div>
+  </div>
+
+  <div id="lightbox" class="hidden" role="dialog" aria-modal="true" aria-label="查看附图">
+    <img alt="附图大图">
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

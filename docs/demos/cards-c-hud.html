@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo C · 终端 HUD Cyberterm</title>
+<style>
+  /* Demo C：终端 HUD 风 —— 等宽字体 + 切角 + 扫描线背景，执行中字符滚动 */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: #0a0f0a;
+    color: #b8d4b0;
+    min-height: 100vh;
+    padding: 24px;
+    position: relative;
+  }
+  /* CRT 扫描线 */
+  body::before {
+    content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 10;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,.18) 0 1px, transparent 1px 3px);
+  }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 18px; font-weight: 700; color: #5cff9d; text-shadow: 0 0 12px rgba(92,255,157,.5);
+       letter-spacing: 1px; }
+  h1::before { content: '> '; color: #2f7a4d; }
+  header small { color: #4a6b52; font-size: 11px; }
+
+  .board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 12px; }
+  .col { flex: 0 0 240px; border: 1px solid #1d3323; padding: 12px;
+         background: rgba(16,26,17,.6);
+         clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px)); }
+  .col h2 { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #5cff9d;
+            margin-bottom: 10px; display: flex; gap: 8px; align-items: center; }
+  .col h2::before { content: '['; color: #2f7a4d; }
+  .col h2::after { content: ']'; color: #2f7a4d; }
+  .col h2 .n { margin-left: auto; color: #4a6b52; }
+  .col h2 .n::before { content: 'n='; }
+  .cards { display: flex; flex-direction: column; gap: 10px; }
+
+  .card {
+    --c: #6f8f76;
+    border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
+    border-left: 3px solid var(--c);
+    background: rgba(10,18,11,.85);
+    padding: 10px 11px 9px;
+    cursor: pointer;
+    clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%);
+    transition: background .15s, box-shadow .15s;
+  }
+  .card:hover { background: color-mix(in srgb, var(--c) 10%, rgba(10,18,11,.9));
+    box-shadow: 0 0 14px -4px color-mix(in srgb, var(--c) 60%, transparent); }
+  .title { font-size: 13px; font-weight: 700; line-height: 1.45; color: #d5e8cd;
+           display: flex; gap: 7px; align-items: flex-start; }
+  .prio { flex: 0 0 auto; margin-top: 4px; font-size: 10px; color: #4a6b52; }
+  .prio.high { color: #ff5d5d; text-shadow: 0 0 8px rgba(255,93,93,.6); }
+  .meta { margin-top: 8px; display: flex; align-items: center; gap: 9px; font-size: 10px; color: #55735c; }
+  .meta .spacer { flex: 1; }
+
+  .col[data-s="backlog"] .card { --c: #6f8f76; }
+  .col[data-s="todo"] .card { --c: #57b8ff; }
+  .col[data-s="in_progress"] .card { --c: #5cff9d; }
+  .col[data-s="blocked"] .card { --c: #ffc14d; }
+  .col[data-s="in_review"] .card { --c: #c792ea; }
+  .col[data-s="done"] .card { --c: #3d8b62; }
+
+  /* 执行中：状态字闪烁 + 边框呼吸 */
+  .card.running {
+    border-color: rgba(92,255,157,.7);
+    box-shadow: 0 0 16px -4px rgba(92,255,157,.5), inset 0 0 20px -12px rgba(92,255,157,.6);
+    animation: hud-pulse 1.8s steps(2) infinite;
+  }
+  @keyframes hud-pulse { 50% { box-shadow: 0 0 24px -2px rgba(92,255,157,.8), inset 0 0 26px -10px rgba(92,255,157,.9); } }
+  .agent-line { display: flex; align-items: center; gap: 6px; margin-top: 8px;
+    font-size: 11px; color: #5cff9d; }
+  .cursor { display: inline-block; width: 7px; height: 12px; background: #5cff9d;
+            animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .stop-btn { margin-left: auto; border: 1px solid rgba(255,93,93,.6); background: transparent;
+              color: #ff5d5d; font-family: inherit; font-size: 10px; padding: 1px 7px; cursor: pointer; }
+  .term { margin-top: 8px; font-size: 10px; line-height: 1.55; color: #4ddb8a;
+          border-top: 1px dashed #1d3323; padding-top: 7px; white-space: pre-wrap; }
+  .term .ok { color: #3d8b62; }
+
+  /* 异常退出 */
+  .card.failed { --c: #ff5d5d; border-color: rgba(255,93,93,.7);
+    background: rgba(40,8,10,.85);
+    box-shadow: 0 0 16px -4px rgba(255,93,93,.6); }
+  .card.failed .title { color: #ffc9c9; }
+  .fail-tag { display: inline-block; margin-top: 8px; font-size: 10px; font-weight: 700;
+    color: #ff5d5d; border: 1px solid rgba(255,93,93,.6); padding: 1px 7px;
+    background: rgba(255,93,93,.1); animation: blink 1.4s steps(1) infinite; }
+
+  .q-badge { font-size: 10px; color: #ffc14d; border: 1px solid rgba(255,193,77,.5); padding: 0 6px; }
+</style>
+</head>
+<body>
+<header><h1>Demo C · 终端 HUD Cyberterm</h1><small>等宽字体 / 切角 / CRT 扫描线 / 执行中字符终端</small></header>
+<div class="board">
+
+  <section class="col" data-s="backlog">
+    <h2>BACKLOG<span class="n">2</span></h2>
+    <div class="cards">
+      <div class="card">
+        <div class="title"><span class="prio high">[!]</span>看板支持多语言切换</div>
+        <div class="meta"><span>#21</span><span class="spacer"></span><span>💬3</span></div>
+      </div>
+      <div class="card failed">
+        <div class="title"><span class="prio">[ ]</span>导出看板为 Markdown</div>
+        <div class="meta"><span>#19</span><span class="spacer"></span></div>
+        <span class="fail-tag">!! EXIT CODE 1</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="todo">
+    <h2>TODO<span class="n">2</span></h2>
+    <div class="cards">
+      <div class="card">
+        <div class="title"><span class="prio">[ ]</span>评论支持 Markdown 渲染</div>
+        <div class="meta"><span>#22</span><span class="spacer"></span><span>REST</span></div>
+      </div>
+      <div class="card">
+        <div class="title"><span class="prio high">[!]</span>任务搜索与过滤</div>
+        <div class="meta"><span>#23</span><span class="spacer"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="in_progress">
+    <h2>RUNNING<span class="n">1</span></h2>
+    <div class="cards">
+      <div class="card running">
+        <div class="title"><span class="prio">[*]</span>需求优化 · 卡片样式重设计</div>
+        <div class="agent-line"><span class="cursor"></span>kimi 03:42<button class="stop-btn">[STOP]</button></div>
+        <div class="term"><span class="ok">$</span> reading server/runner.mjs…
+<span class="ok">$</span> thinking: 输出缓冲改环形…</div>
+        <div class="meta"><span>#16</span><span class="spacer"></span><span>💬5</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="blocked">
+    <h2>BLOCKED<span class="n">1</span></h2>
+    <div class="cards">
+      <div class="card">
+        <div class="title"><span class="prio">[?]</span>接入第三方登录</div>
+        <div class="meta"><span>#17</span><span class="q-badge">AWAIT</span><span class="spacer"></span><span>💬2</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="in_review">
+    <h2>REVIEW<span class="n">1</span></h2>
+    <div class="cards">
+      <div class="card">
+        <div class="title"><span class="prio">[%]</span>隧道断线自动重连</div>
+        <div class="meta"><span>#15</span><span class="spacer"></span><span>💬4</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col" data-s="done">
+    <h2>DONE<span class="n">1</span></h2>
+    <div class="cards">
+      <div class="card" style="opacity:.7">
+        <div class="title"><span class="prio">[✓]</span>评论图片附件</div>
+        <div class="meta"><span>#12</span><span class="spacer"></span><span>OK</span></div>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

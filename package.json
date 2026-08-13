@@ -1,0 +1,15 @@
+{
+  "name": "taskpin",
+  "version": "0.1.0",
+  "description": "Local-first task board for Codex/Kimi agents: kanban UI + taskctl CLI + agent skill protocol",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "taskctl": "node cli/taskctl.mjs",
+    "test": "node --test 'test/**/*.test.mjs'"
+  }
+}

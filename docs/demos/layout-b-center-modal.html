@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>布局 B · 居中模态 评论流</title>
+<style>
+  /* 布局 B：居中宽模态；垂直信息流——标题 → 最新评论 → 大输入框+执行 → 历史评论；属性收进侧条 */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+    color: #1b2340;
+    min-height: 100vh;
+    background:
+      radial-gradient(600px 400px at 15% 10%, rgba(99,140,255,.45), transparent 60%),
+      radial-gradient(700px 500px at 85% 20%, rgba(190,120,255,.4), transparent 60%),
+      radial-gradient(600px 500px at 50% 100%, rgba(80,220,200,.35), transparent 60%),
+      linear-gradient(160deg, #dfe6f7, #cfd8f2);
+    overflow: hidden;
+  }
+  .board { display: flex; gap: 14px; padding: 24px; filter: blur(1.5px) saturate(.8); opacity: .55; }
+  .bcol { flex: 0 0 220px; border-radius: 16px; padding: 12px; background: rgba(255,255,255,.32);
+          border: 1px solid rgba(255,255,255,.55); min-height: 70vh; }
+  .bcol h3 { font-size: 12px; color: #4a5480; letter-spacing: 1.5px; margin-bottom: 10px; }
+  .bcard { background: rgba(255,255,255,.6); border: 1px solid rgba(255,255,255,.8);
+           border-radius: 12px; padding: 10px; font-size: 13px; margin-bottom: 8px; color: #232c4d; }
+
+  .scrim { position: fixed; inset: 0; background: rgba(40,48,80,.25);
+           backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); z-index: 9; }
+
+  /* 居中宽模态 */
+  .modal {
+    position: fixed; z-index: 10;
+    top: 4vh; bottom: 4vh; left: 50%; transform: translateX(-50%);
+    width: min(720px, 94vw);
+    background: rgba(255,255,255,.82);
+    backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px);
+    border: 1px solid rgba(255,255,255,.95);
+    border-radius: 20px;
+    box-shadow: 0 24px 80px -20px rgba(60,70,140,.45);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .m-head { display: flex; align-items: center; gap: 10px; padding: 16px 22px 12px; }
+  .m-head .id { font-family: ui-monospace, monospace; color: #7a84ad; font-size: 12px; }
+  .m-head h1 { font-size: 18px; font-weight: 700; color: #232c4d; flex: 1; }
+  .status-chip { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 99px;
+                 background: rgba(6,182,212,.14); color: #0e7490; }
+  .m-close { border: none; background: rgba(90,100,150,.1); width: 30px; height: 30px; border-radius: 8px;
+             font-size: 15px; color: #4a5480; cursor: pointer; }
+
+  /* 属性横条（一行式，不占地） */
+  .props-bar { display: flex; gap: 14px; flex-wrap: wrap; padding: 0 22px 12px;
+               font-size: 12px; color: #4a5480; border-bottom: 1px solid rgba(90,100,150,.15); }
+  .props-bar b { color: #9aa3c0; font-weight: 600; margin-right: 4px; }
+  .props-bar .link { color: #2563eb; cursor: pointer; }
+
+  .m-body { flex: 1; overflow-y: auto; padding: 16px 22px; }
+
+  .latest {
+    border: 1px solid rgba(37,99,235,.3);
+    background: linear-gradient(135deg, rgba(37,99,235,.08), rgba(139,92,246,.07));
+    border-radius: 14px; padding: 14px 16px;
+  }
+  .latest .tag { font-size: 10px; font-weight: 800; letter-spacing: 1px; color: #2563eb; margin-bottom: 6px; }
+  .who { display: flex; gap: 8px; align-items: center; font-size: 11px; color: #7a84ad; margin-bottom: 5px; }
+  .who .agent { font-weight: 700; color: #2563eb; background: rgba(37,99,235,.1); padding: 1px 8px; border-radius: 99px; }
+  .who .user { font-weight: 700; color: #7c3aed; background: rgba(124,58,237,.1); padding: 1px 8px; border-radius: 99px; }
+  .bubble { font-size: 13.5px; line-height: 1.65; color: #2a3352; white-space: pre-wrap; }
+
+  /* 大输入框紧跟最新评论，视线不下移 */
+  .composer { margin-top: 14px; }
+  .composer textarea {
+    width: 100%; min-height: 120px; resize: vertical;
+    border: 1px solid rgba(90,100,150,.3); border-radius: 12px;
+    background: rgba(255,255,255,.92); padding: 12px 14px; font-size: 14px; font-family: inherit;
+    line-height: 1.6; color: #232c4d; outline: none;
+  }
+  .composer textarea:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+  .composer-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+  .btn { border: none; border-radius: 10px; padding: 10px 18px; font-size: 13.5px; font-weight: 700; cursor: pointer; }
+  .btn-publish { flex: 1; background: #2563eb; color: #fff; }
+  .btn-run { background: rgba(6,182,212,.15); color: #0e7490; border: 1px solid rgba(6,182,212,.4); }
+  .hint { font-size: 10.5px; color: #9aa3c0; margin-top: 6px; }
+
+  .sec-title { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: #7a84ad; margin: 20px 0 8px; }
+  .comment { background: rgba(255,255,255,.55); border: 1px solid rgba(255,255,255,.8);
+             border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div class="board">
+  <div class="bcol"><h3>进行中</h3><div class="bcard">需求优化 · 详情布局重规划</div><div class="bcard">隧道断线自动重连</div></div>
+  <div class="bcol"><h3>阻塞</h3><div class="bcard">接入第三方登录</div></div>
+  <div class="bcol"><h3>待验收</h3><div class="bcard">评论图片灯箱</div></div>
+</div>
+<div class="scrim"></div>
+
+<div class="modal">
+  <div class="m-head">
+    <span class="id">#16</span>
+    <h1>需求优化 · 详情布局重规划</h1>
+    <span class="status-chip">进行中</span>
+    <button class="m-close">×</button>
+  </div>
+  <div class="props-bar">
+    <span><b>优先级</b>普通</span>
+    <span><b>执行</b>kimi · 3:42</span>
+    <span><b>更新</b>08-11 14:20</span>
+    <span class="link">查看完整描述与流转操作 →</span>
+  </div>
+  <div class="m-body">
+    <!-- 第一屏：最新评论 + 大输入框 + 执行按钮，一屏全看见 -->
+    <div class="latest">
+      <div class="tag">◆ 最新评论</div>
+      <div class="who"><span class="agent">Agent</span><span>2026-08-11 14:20</span></div>
+      <div class="bubble">玻璃拟态已落地到正式 style.css：极光底 + 磨砂列/卡 + 执行中流光边框。灯箱也改好了，点附图页面内查看。截图见附图。</div>
+    </div>
+
+    <div class="composer">
+      <textarea placeholder="写下你的评论…（支持附图，Ctrl/⌘+Enter 发送）"></textarea>
+      <div class="composer-row">
+        <button class="btn btn-publish">发布评论</button>
+        <button class="btn btn-run">▶ 执行 / 问答</button>
+      </div>
+      <div class="hint">发布评论后可直接点「执行 / 问答」让 Agent 接着干</div>
+    </div>
+
+    <div class="sec-title">更早的评论 · 3</div>
+    <div class="comment">
+      <div class="who"><span class="user">用户</span><span>2026-08-11 13:58</span></div>
+      <div class="bubble">需求6 用 demo B 玻璃拟态；评论图片不要开新页。</div>
+    </div>
+    <div class="comment">
+      <div class="who"><span class="agent">Agent</span><span>2026-08-11 13:10</span></div>
+      <div class="bubble">额度区 404 是旧进程导致，已重启修复。新隧道域名见上条。</div>
+    </div>
+    <div class="comment">
+      <div class="who"><span class="user">用户</span><span>2026-08-11 00:03</span></div>
+      <div class="bubble">额度查询：GET /api/quota not found</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

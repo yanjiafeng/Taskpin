@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>原型 C · 多彩轻快 — Task Board</title>
+<style>
+  :root{
+    --bg:#fdf6ec; --panel:#ffffff; --ink:#2b2440; --ink2:#7a7194; --ink3:#a89fbe;
+    --line:#efe6d8;
+    --c1:#8b5cf6; --c1bg:#ede9fe;   /* 待规划 紫 */
+    --c2:#0ea5e9; --c2bg:#e0f2fe;   /* 待办 蓝 */
+    --c3:#f59e0b; --c3bg:#fef3c7;   /* 进行中 橙 */
+    --c4:#ec4899; --c4bg:#fce7f3;   /* 待验收 粉 */
+    --c5:#10b981; --c5bg:#d1fae5;   /* 已完成 绿 */
+    --red:#ef4444; --redbg:#fee2e2;
+    --r:16px; --r-sm:12px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Helvetica Neue",Arial,sans-serif;
+    background:var(--bg);color:var(--ink);font-size:14px;line-height:1.55}
+  button{font:inherit;cursor:pointer}
+
+  /* ── 顶栏 ── */
+  .topbar{display:flex;align-items:center;gap:12px;padding:14px 18px;position:sticky;top:0;z-index:20;
+    background:rgba(253,246,236,.9);backdrop-filter:blur(8px)}
+  .brand{font-weight:800;font-size:17px;display:flex;align-items:center;gap:9px;white-space:nowrap}
+  .brand .logo{width:26px;height:26px;border-radius:9px;
+    background:conic-gradient(from 40deg,var(--c1),var(--c2),var(--c5),var(--c4),var(--c1))}
+  .proj-select{border:2px solid var(--line);background:var(--panel);border-radius:999px;
+    padding:6px 14px;color:var(--ink);font:inherit;font-weight:600}
+  .topbar .spacer{flex:1}
+  .icon-btn{border:2px solid var(--line);background:var(--panel);border-radius:999px;
+    width:36px;height:36px}
+  .icon-btn:hover{border-color:var(--c1)}
+  .new-btn{border:none;background:var(--ink);color:#fff;border-radius:999px;
+    padding:9px 18px;font-weight:700;box-shadow:0 4px 0 rgba(43,36,64,.18)}
+  .new-btn:active{transform:translateY(2px);box-shadow:none}
+
+  /* ── 看板泳道 ── */
+  .board{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;padding:6px 18px 18px;align-items:start}
+  .lane{border-radius:var(--r);padding:12px 10px}
+  .lane.c1{background:var(--c1bg)}.lane.c2{background:var(--c2bg)}.lane.c3{background:var(--c3bg)}
+  .lane.c4{background:var(--c4bg)}.lane.c5{background:var(--c5bg)}
+  .lane.c6{background:#f3f4f6}.lane.c7{background:#f3f4f6}
+  .lane-head{display:flex;align-items:center;gap:8px;padding:0 4px 10px}
+  .lane-name{font-weight:800;font-size:13.5px}
+  .c1 .lane-name{color:var(--c1)}.c2 .lane-name{color:var(--c2)}.c3 .lane-name{color:#b45309}
+  .c4 .lane-name{color:var(--c4)}.c5 .lane-name{color:#047857}.c6 .lane-name,.c7 .lane-name{color:var(--ink2)}
+  .lane-count{font-size:11px;font-weight:800;background:#fff;border-radius:999px;
+    padding:2px 9px;color:var(--ink2)}
+  .lane-add{margin-left:auto;border:none;background:#fff;color:var(--ink2);border-radius:999px;
+    width:24px;height:24px;font-size:15px;line-height:1}
+  .lane-add:hover{color:var(--c1)}
+
+  /* ── 卡片 ── */
+  .card{background:var(--panel);border-radius:var(--r-sm);padding:12px 13px;margin-bottom:9px;
+    cursor:pointer;box-shadow:0 2px 0 rgba(43,36,64,.07);border:2px solid transparent}
+  .card:hover{border-color:var(--ink)}
+  .card .title{font-weight:700;font-size:13.5px;margin-bottom:8px}
+  .card .meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11.5px;color:var(--ink2)}
+  .tag{border-radius:999px;padding:2px 9px;font-size:11px;font-weight:700}
+  .pri-high{color:var(--red);background:var(--redbg)}
+  .pri-normal{color:var(--c2);background:var(--c2bg)}
+  .pri-low{color:var(--ink2);background:#f3f4f6}
+  .tag.proj{color:var(--c1);background:var(--c1bg)}
+  .tid{color:var(--ink3);font-weight:700}
+  .agent-run{display:inline-flex;align-items:center;gap:6px;color:#b45309;font-weight:800}
+  .agent-run::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--c3);
+    animation:pulse 1.2s infinite}
+  @keyframes pulse{50%{opacity:.3}}
+  .card.crashed{background:var(--redbg);box-shadow:0 2px 0 rgba(239,68,68,.25)}
+  .crash-badge{color:var(--red);font-weight:800}
+  .done-mark{color:#047857;font-weight:800}
+  .q-badge{color:var(--c4);font-weight:800}
+  .card .foot{margin-top:8px;font-size:11px;color:var(--ink3);font-weight:600}
+
+  /* ── 详情抽屉 ── */
+  .backdrop{position:fixed;inset:0;background:rgba(43,36,64,.35);z-index:30}
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:min(760px,94vw);background:var(--bg);
+    z-index:31;display:grid;grid-template-columns:300px 1fr;
+    border-radius:20px 0 0 20px;box-shadow:-14px 0 44px rgba(43,36,64,.25);overflow:hidden}
+  .drawer-left{background:var(--panel);padding:20px;overflow:auto}
+  .drawer-right{display:flex;flex-direction:column;overflow:hidden}
+  .d-id{font-size:12px;color:var(--ink3);font-weight:700}
+  .d-title{font-size:18px;font-weight:800;margin:4px 0 14px}
+  .prop{display:flex;justify-content:space-between;padding:8px 0;
+    border-bottom:2px dashed var(--line);font-size:13px}
+  .prop .k{color:var(--ink3);font-weight:600}
+  .status-pill{color:#b45309;background:var(--c3bg);border-radius:999px;padding:2px 10px;
+    font-weight:800;font-size:12px}
+  .d-sec{margin:18px 0 8px;font-size:12px;font-weight:800;color:var(--c1);
+    text-transform:uppercase;letter-spacing:.6px}
+  .d-desc{font-size:13px;white-space:pre-wrap}
+  .flow-btns{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+  .flow-btn{border:2px solid var(--line);background:var(--panel);border-radius:999px;
+    padding:8px 14px;text-align:center;font-weight:700}
+  .flow-btn:hover{border-color:var(--ink)}
+  .flow-btn.primary{background:var(--c5);border-color:var(--c5);color:#fff}
+  .comments{flex:1;overflow:auto;padding:20px}
+  .comment{margin-bottom:14px;max-width:92%}
+  .comment .c-head{display:flex;gap:8px;align-items:baseline;margin-bottom:4px}
+  .c-author{font-weight:800;font-size:12.5px}
+  .c-author.user{color:var(--c1)}
+  .c-author.agent{color:var(--c2)}
+  .c-author.runner{color:var(--ink3)}
+  .c-time{font-size:11px;color:var(--ink3);font-weight:600}
+  .c-body{font-size:13px;background:var(--panel);border-radius:var(--r-sm);
+    padding:10px 13px;white-space:pre-wrap;box-shadow:0 2px 0 rgba(43,36,64,.06)}
+  .comment.ask .c-body{background:var(--c4bg)}
+  .composer{background:var(--panel);border-top:2px solid var(--line);padding:14px 20px}
+  .composer textarea{width:100%;border:2px solid var(--line);border-radius:var(--r-sm);
+    padding:10px;font:inherit;resize:vertical;min-height:64px;background:var(--bg)}
+  .composer textarea:focus{outline:none;border-color:var(--c1)}
+  .composer-row{display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap}
+  .btn{border:2px solid var(--line);background:var(--panel);border-radius:999px;
+    padding:7px 15px;font-weight:700}
+  .btn.primary{background:var(--c1);border-color:var(--c1);color:#fff}
+  .btn.exec{background:var(--c3);border-color:var(--c3);color:#fff}
+  .btn.qa{background:var(--c2);border-color:var(--c2);color:#fff}
+  .btn.danger{color:var(--red);border-color:var(--red)}
+  .composer-row .spacer{flex:1}
+  .drawer-close{position:absolute;top:12px;right:14px;border:2px solid var(--line);
+    background:var(--panel);border-radius:999px;width:32px;height:32px;font-size:15px;
+    color:var(--ink2);z-index:2}
+  .hidden{display:none!important}
+
+  /* ── 移动端：纵向手风琴 ── */
+  @media (max-width:768px){
+    .board{display:block;padding:4px 10px 12px}
+    .lane{margin-bottom:10px;padding:0;overflow:hidden;border-radius:var(--r)}
+    .lane-head{padding:13px 15px;cursor:pointer;user-select:none}
+    .lane-head .chev{margin-left:auto;color:var(--ink2);font-weight:800;transition:transform .15s}
+    .lane.open .lane-head .chev{transform:rotate(90deg)}
+    .lane-head .lane-add{display:none}
+    .lane-body{display:none;padding:0 10px 10px}
+    .lane.open .lane-body{display:block}
+    .card{cursor:default}
+    .card .ops{display:flex;gap:6px;margin-top:9px}
+    .card .ops button{flex:1;border:2px solid var(--line);background:var(--panel);
+      border-radius:999px;padding:6px 0;font-size:12px;font-weight:700}
+    .drawer{grid-template-columns:1fr;width:100vw;border-radius:0}
+    .drawer-left{border-bottom:2px solid var(--line)}
+    .topbar{padding:10px 12px;gap:8px}
+  }
+  @media (min-width:769px){ .card .ops{display:none} .lane-body{display:block} }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="logo"></span>Task Board</div>
+  <select class="proj-select" aria-label="选择项目">
+    <option>全部项目</option><option selected>Task Board</option><option>个人博客</option>
+  </select>
+  <span class="spacer"></span>
+  <button class="icon-btn" title="额度">💰</button>
+  <button class="icon-btn" title="公网分享">🌐</button>
+  <button class="icon-btn" title="设置">⚙</button>
+  <button class="new-btn">＋ 新建任务</button>
+</header>
+
+<main class="board" aria-label="任务看板">
+
+  <section class="lane c1 open">
+    <div class="lane-head"><span class="lane-name">待规划</span><span class="lane-count">2</span>
+      <button class="lane-add" title="新建">＋</button><span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">支持任务标签系统</div>
+        <div class="meta"><span class="tag pri-high">高</span><span class="tag proj">Task Board</span><span class="tid">#21</span></div>
+        <div class="ops"><button>移到待办</button><button>详情</button></div>
+        <div class="foot">创建于 08-10</div>
+      </article>
+      <article class="card">
+        <div class="title">看板搜索与过滤</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag proj">Task Board</span><span class="tid">#22</span></div>
+        <div class="ops"><button>移到待办</button><button>详情</button></div>
+        <div class="foot">创建于 08-11</div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane c2 open">
+    <div class="lane-head"><span class="lane-name">待办</span><span class="lane-count">1</span>
+      <button class="lane-add" title="新建">＋</button><span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">执行输出弹框支持一键复制</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag proj">Task Board</span><span class="tid">#19</span></div>
+        <div class="ops"><button>开始执行</button><button>详情</button></div>
+        <div class="foot">等待 Agent 认领</div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane c3 open">
+    <div class="lane-head"><span class="lane-name">进行中</span><span class="lane-count">1</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card" onclick="toggleDrawer(true)">
+        <div class="title">界面设计</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag proj">Task Board</span><span class="tid">#18</span></div>
+        <div class="meta" style="margin-top:6px"><span class="agent-run">kimi · 02:41</span></div>
+        <div class="ops"><button>查看输出</button><button>停止</button></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane c4 open">
+    <div class="lane-head"><span class="lane-name">待验收</span><span class="lane-count">2</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">评论支持附图</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag proj">Task Board</span><span class="tid">#15</span></div>
+        <div class="ops"><button>验收通过</button><button>打回重做</button></div>
+        <div class="foot">kimi 交付 · 等待你验收</div>
+      </article>
+      <article class="card crashed">
+        <div class="title">隧道断开自动重连</div>
+        <div class="meta"><span class="tag pri-high">高</span><span class="tag proj">Task Board</span><span class="tid">#17</span></div>
+        <div class="meta" style="margin-top:6px"><span class="crash-badge">✕ 异常退出 · reasonix code=1</span></div>
+        <div class="ops"><button>查看输出</button><button>重新执行</button></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane c5 open">
+    <div class="lane-head"><span class="lane-name">已完成</span><span class="lane-count">1</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">三家额度查询面板</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag proj">Task Board</span><span class="tid">#12</span></div>
+        <div class="meta" style="margin-top:6px"><span class="done-mark">✓ 已验收 · codex</span></div>
+        <div class="ops"><button>详情</button></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane c6 open">
+    <div class="lane-head"><span class="lane-name">阻塞</span><span class="lane-count">1</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">移动端卡片拖拽排序</div>
+        <div class="meta"><span class="tag pri-low">低</span><span class="tag proj">Task Board</span><span class="tid">#20</span>
+          <span class="q-badge">[提问] 等待答复</span></div>
+        <div class="ops"><button>去答复</button><button>详情</button></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane c7">
+    <div class="lane-head"><span class="lane-name">已取消</span><span class="lane-count">1</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card" style="opacity:.55">
+        <div class="title" style="text-decoration:line-through">旧版 UI 下线</div>
+        <div class="meta"><span class="tag proj">Task Board</span><span class="tid">#9</span></div>
+        <div class="ops"><button>删除</button><button>详情</button></div>
+      </article>
+    </div>
+  </section>
+
+</main>
+
+<!-- 详情抽屉 -->
+<div class="backdrop hidden" id="backdrop" onclick="toggleDrawer(false)"></div>
+<aside class="drawer hidden" id="drawer" aria-label="任务详情">
+  <button class="drawer-close" onclick="toggleDrawer(false)">×</button>
+  <div class="drawer-left">
+    <div class="d-id">#18 · Task Board</div>
+    <div class="d-title">界面设计</div>
+    <div class="prop"><span class="k">状态</span><span class="status-pill">进行中</span></div>
+    <div class="prop"><span class="k">优先级</span><span>普通</span></div>
+    <div class="prop"><span class="k">执行 Agent</span><span class="agent-run">kimi · 02:41</span></div>
+    <div class="prop"><span class="k">创建时间</span><span>2026-08-11 20:33</span></div>
+    <div class="d-sec">描述</div>
+    <div class="d-desc">找一个工具或者 skill，设计几套适用于 Task Board 的界面原型。
+
+验收标准
+1. docs/prototypes/ 下产出 3 套风格不同的原型，浏览器直接打开可预览；
+2. 每套含桌面五列泳道 + 移动端（≤768px）纵向手风琴，移动端不依赖拖拽/悬停；
+3. 覆盖核心元素：泳道、任务卡片、详情抽屉、执行/停止按钮；
+4. 附 README 索引说明风格定位与打开方式。</div>
+    <div class="d-sec">流转</div>
+    <div class="flow-btns">
+      <button class="flow-btn">回待规划（停止执行）</button>
+      <button class="flow-btn primary">提交验收 →</button>
+    </div>
+  </div>
+  <div class="drawer-right">
+    <div class="comments">
+      <div class="comment">
+        <div class="c-head"><span class="c-author user">user</span><span class="c-time">20:33</span></div>
+        <div class="c-body">找一个工具或者 skill，给我设计几套适用于 Task board 的界面原型</div>
+      </div>
+      <div class="comment">
+        <div class="c-head"><span class="c-author runner">[runner]</span><span class="c-time">20:35</span></div>
+        <div class="c-body">kimi 正常结束，用时 100s（输出尾部略）</div>
+      </div>
+      <div class="comment ask">
+        <div class="c-head"><span class="c-author agent">agent</span><span class="c-time">20:35</span></div>
+        <div class="c-body">[提问] 描述中没有验收标准。草案：1. 3 套原型……请确认。</div>
+      </div>
+      <div class="comment">
+        <div class="c-head"><span class="c-author user">user</span><span class="c-time">20:55</span></div>
+        <div class="c-body">1</div>
+      </div>
+    </div>
+    <div class="composer">
+      <textarea placeholder="写下评论、验收意见或对 [提问] 的答复…"></textarea>
+      <div class="composer-row">
+        <button class="btn primary">发表评论</button>
+        <span class="spacer"></span>
+        <button class="btn exec">⚡ 执行</button>
+        <button class="btn qa">💬 问答</button>
+        <button class="btn danger">■ 停止</button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<script>
+  // 原型演示用：手风琴展开/收起 + 抽屉开关，零依赖
+  document.querySelectorAll('.lane-head').forEach(function(h){
+    h.addEventListener('click',function(e){
+      if(e.target.classList.contains('lane-add'))return;
+      if(window.innerWidth<=768)h.parentElement.classList.toggle('open');
+    });
+  });
+  function toggleDrawer(open){
+    document.getElementById('drawer').classList.toggle('hidden',!open);
+    document.getElementById('backdrop').classList.toggle('hidden',!open);
+  }
+  if(location.hash==='#drawer')toggleDrawer(true);
+  document.querySelectorAll('.card').forEach(function(c){
+    c.addEventListener('click',function(){toggleDrawer(true);});
+  });
+</script>
+</body>
+</html>

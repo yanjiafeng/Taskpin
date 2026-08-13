@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>原型 k-catalog — Task Board</title>
+<style>
+  :root{
+    color-scheme:light;
+    --wood1:#b98c5e; --wood2:#8a6540;
+    --card:#fdf6e3; --card-line:rgba(44,62,80,.07);
+    --ink:#2c3e50; --ink2:#8a7f6a;
+    --stamp:#b8392e;
+    --cat-backlog:#8fa8bf; --cat-todo:#5b8bc0; --cat-doing:#d9a441;
+    --cat-review:#9b7fb8; --cat-done:#6fa287; --cat-side:#b0a89a;
+    --metal-top:rgba(255,255,255,.55); --metal-bot:rgba(44,62,80,.25);
+    --r:6px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Helvetica Neue",Arial,sans-serif;
+    background:linear-gradient(160deg,var(--wood1),var(--wood2));
+    color:var(--ink);font-size:14px;line-height:1.55;min-height:100vh}
+  button{font:inherit;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  button:focus-visible,select:focus-visible,textarea:focus-visible{
+    outline:2px solid var(--stamp);outline-offset:2px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-variant-numeric:tabular-nums}
+
+  /* ── 顶栏 ── */
+  .topbar{display:flex;align-items:center;gap:12px;height:52px;
+    padding:0 calc(16px + env(safe-area-inset-right)) 0 calc(16px + env(safe-area-inset-left));
+    background:linear-gradient(#fdf6e3,#f3ead2);
+    border-bottom:1px solid rgba(44,62,80,.25);position:sticky;top:0;z-index:20;
+    box-shadow:0 2px 8px rgba(44,20,0,.25)}
+  .brand{font-family:Georgia,"Songti SC",serif;font-variant:small-caps;
+    font-weight:700;font-size:16px;letter-spacing:.5px;display:flex;align-items:center;gap:8px;white-space:nowrap}
+  .brand .dot{width:10px;height:10px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#e0604f,#8e2a20);
+    box-shadow:0 1px 2px rgba(44,20,0,.4)}
+  .proj-select{border:1px solid rgba(44,62,80,.3);background:var(--card);border-radius:var(--r);
+    padding:5px 10px;color:var(--ink);font:inherit;max-width:34vw}
+  .topbar .spacer{flex:1}
+  .icon-btn{border:1px solid rgba(44,62,80,.3);background:var(--card);border-radius:var(--r);
+    width:32px;height:32px;color:var(--ink2);flex:none}
+  .icon-btn:hover{border-color:var(--ink);color:var(--ink)}
+  .new-btn{border:1px solid var(--ink);background:var(--ink);color:var(--card);
+    border-radius:var(--r);padding:6px 14px;font-weight:600;white-space:nowrap}
+
+  /* ── 看板泳道：档案盒格 ── */
+  .board{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;
+    padding:16px calc(16px + env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+    align-items:start}
+  .lane{background:rgba(60,35,10,.28);border-radius:8px;padding:10px;
+    box-shadow:inset 0 2px 10px rgba(30,15,0,.45),inset 0 -1px 0 rgba(255,235,200,.15)}
+  .lane-head{display:flex;align-items:baseline;gap:8px;padding:6px 10px;margin-bottom:10px;
+    background:linear-gradient(#f7efdb,#e8dcbd);border:1px solid rgba(44,62,80,.35);
+    border-top-color:var(--metal-top);border-radius:4px;
+    box-shadow:0 1px 2px rgba(30,15,0,.35),inset 0 -1px 0 var(--metal-bot)}
+  .lane-name{font-family:Georgia,"Songti SC",serif;font-variant:small-caps;
+    font-weight:700;font-size:13.5px;letter-spacing:1px}
+  .lane-count{font-size:11.5px;color:var(--ink2);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-variant-numeric:tabular-nums}
+  .lane-add{margin-left:auto;border:none;background:none;color:var(--ink2);font-size:16px;line-height:1}
+  .lane-add:hover{color:var(--ink)}
+  .lane.blocked-lane,.lane.canceled-lane{background:rgba(50,35,15,.18);
+    box-shadow:inset 0 2px 8px rgba(30,15,0,.35)}
+  .lane[data-cat="backlog"]{--cat:var(--cat-backlog)}
+  .lane[data-cat="todo"]{--cat:var(--cat-todo)}
+  .lane[data-cat="doing"]{--cat:var(--cat-doing)}
+  .lane[data-cat="review"]{--cat:var(--cat-review)}
+  .lane[data-cat="done"]{--cat:var(--cat-done)}
+  .lane.blocked-lane,.lane.canceled-lane{--cat:var(--cat-side)}
+  .lane-head{border-top:3px solid var(--cat)}
+
+  /* ── 卡片：索引卡 ── */
+  .card{background:var(--card) repeating-linear-gradient(transparent 0 23px,var(--card-line) 23px 24px);
+    border:1px solid rgba(44,62,80,.28);border-top:6px solid var(--cat);
+    border-radius:3px;padding:10px 12px;margin-bottom:10px;cursor:pointer;position:relative;
+    box-shadow:0 2px 5px rgba(30,15,0,.28)}
+  .card:hover{border-color:rgba(44,62,80,.55)}
+  .card .title{font-weight:600;font-size:13.5px;margin-bottom:6px;overflow-wrap:break-word}
+  .card .meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11.5px;color:var(--ink2);min-width:0}
+  .tag{border:1px solid rgba(44,62,80,.3);border-radius:999px;padding:1px 8px;font-size:11px;color:var(--ink2);
+    white-space:nowrap}
+  .pri-high{color:var(--stamp);border-color:rgba(184,57,46,.5);background:rgba(184,57,46,.08)}
+  .pri-normal{color:var(--ink2)}
+  .pri-low{color:var(--ink2)}
+  .num{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-variant-numeric:tabular-nums;color:var(--ink2);font-size:11px}
+  .agent-run{display:inline-flex;align-items:center;gap:5px;color:#8a5f10;font-weight:600;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;font-size:11.5px}
+  .agent-run::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--cat-doing);
+    animation:pulse 1.2s infinite}
+  @keyframes pulse{50%{opacity:.3}}
+  .card.crashed{border-color:rgba(184,57,46,.6);border-left:4px solid var(--stamp)}
+  .crash-badge{color:var(--stamp);font-weight:700;font-style:italic;
+    font-family:Georgia,"Songti SC",serif;font-size:12px}
+  .done-mark{color:#3f6b52;font-weight:600;font-size:12px}
+  .q-note{display:inline-block;background:#f5c86a;color:#5c4310;font-size:11px;font-weight:600;
+    padding:1px 8px;border-radius:2px;transform:rotate(2deg);
+    box-shadow:0 1px 3px rgba(60,35,10,.3);white-space:nowrap}
+  .card .foot{margin-top:6px;font-size:11px;color:var(--ink2);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+
+  /* ── 签名元素：已验收朱砂印章 ── */
+  .stamp{position:absolute;top:6px;right:8px;width:64px;height:64px;border-radius:50%;
+    border:2.5px solid var(--stamp);color:var(--stamp);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    font-family:Georgia,"Songti SC",serif;font-weight:700;font-size:13px;line-height:1.15;
+    transform:rotate(-12deg);opacity:.8;pointer-events:none;letter-spacing:2px}
+  .stamp::before{content:"";position:absolute;inset:4px;border:1px solid var(--stamp);border-radius:50%}
+  .stamp small{font-size:8px;letter-spacing:1px;font-weight:400}
+  .done-card .title,.done-card .meta{padding-right:56px}
+
+  /* ── 详情抽屉 ── */
+  .backdrop{position:fixed;inset:0;background:rgba(40,22,5,.45);z-index:30}
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:min(760px,94vw);
+    background:var(--card) repeating-linear-gradient(transparent 0 23px,var(--card-line) 23px 24px);
+    z-index:31;display:grid;grid-template-columns:300px 1fr;
+    box-shadow:-12px 0 40px rgba(30,15,0,.4);
+    padding-bottom:env(safe-area-inset-bottom)}
+  .drawer-left{border-right:1px solid rgba(44,62,80,.25);padding:20px;overflow:auto;
+    overscroll-behavior:contain}
+  .drawer-right{display:flex;flex-direction:column;overflow:hidden;min-width:0}
+  .d-id{font-size:12px;color:var(--ink2);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-variant-numeric:tabular-nums}
+  .d-title{font-family:Georgia,"Songti SC",serif;font-size:19px;font-weight:700;margin:4px 0 14px;
+    overflow-wrap:break-word;text-wrap:balance}
+  .prop{display:flex;justify-content:space-between;gap:10px;padding:7px 0;
+    border-bottom:1px solid rgba(44,62,80,.12);font-size:13px}
+  .prop .k{color:var(--ink2);flex:none}
+  .prop .v{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:break-word}
+  .d-sec{margin:18px 0 8px;font-size:12px;font-weight:700;color:var(--ink2);
+    font-family:Georgia,"Songti SC",serif;font-variant:small-caps;letter-spacing:1.5px}
+  .d-desc{font-size:13px;white-space:pre-wrap;overflow-wrap:break-word}
+  .flow-btns{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+  .flow-btn{border:1px solid rgba(44,62,80,.35);background:#f7efdb;border-radius:var(--r);
+    padding:8px 12px;text-align:left;font-weight:600;color:var(--ink)}
+  .flow-btn:hover{border-color:var(--ink)}
+  .flow-btn.primary{background:var(--cat-done);color:#fff;border-color:var(--cat-done)}
+  .comments{flex:1;overflow:auto;padding:20px;overscroll-behavior:contain}
+  .comment{margin-bottom:14px}
+  .comment .c-head{display:flex;gap:8px;align-items:baseline;margin-bottom:3px}
+  .c-author{font-weight:700;font-size:12.5px}
+  .c-author.user{color:var(--ink)}
+  .c-author.agent{color:#5b3d8f}
+  .c-author.runner{color:var(--ink2);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .c-time{font-size:11px;color:var(--ink2);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-variant-numeric:tabular-nums}
+  .c-body{font-size:13px;background:rgba(255,252,240,.85);border:1px solid rgba(44,62,80,.15);
+    border-radius:var(--r);padding:9px 12px;white-space:pre-wrap;overflow-wrap:break-word}
+  .comment.ask .c-body{border-left:3px solid var(--cat-doing)}
+  .composer{border-top:1px solid rgba(44,62,80,.25);padding:14px 20px;background:#f7efdb}
+  .composer textarea{width:100%;border:1px solid rgba(44,62,80,.35);border-radius:var(--r);
+    padding:10px;font:inherit;resize:vertical;min-height:64px;background:#fffdf4;color:var(--ink)}
+  .composer-row{display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap}
+  .btn{border:1px solid rgba(44,62,80,.35);background:#fdf6e3;border-radius:var(--r);
+    padding:7px 14px;font-weight:600;color:var(--ink)}
+  .btn.primary{background:var(--ink);color:var(--card);border-color:var(--ink)}
+  .btn.danger{color:var(--stamp);border-color:rgba(184,57,46,.5)}
+  .composer-row .spacer{flex:1}
+  .drawer-close{position:absolute;top:12px;right:14px;border:none;background:none;
+    font-size:20px;color:var(--ink2);z-index:2;width:32px;height:32px}
+  .hidden{display:none!important}
+
+  /* ── 移动端：纵向手风琴 ── */
+  @media (max-width:768px){
+    .board{display:block;padding:10px calc(10px + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) calc(10px + env(safe-area-inset-left))}
+    .lane{margin-bottom:10px;padding:0;overflow:hidden}
+    .lane-head{padding:12px 14px;margin-bottom:0;cursor:pointer;user-select:none;align-items:center;border-radius:0}
+    .lane-head .chev{margin-left:auto;color:var(--ink2);transition:transform .15s ease}
+    .lane.open .lane-head .chev{transform:rotate(90deg)}
+    .lane-head .lane-add{display:none}
+    .lane-body{display:none;padding:10px}
+    .lane.open .lane-body{display:block}
+    .lane.open .lane-head{margin-bottom:2px}
+    .card{cursor:default}
+    .card .ops{display:flex;gap:6px;margin-top:8px}
+    .card .ops button{flex:1;border:1px solid rgba(44,62,80,.35);background:#fffdf4;
+      border-radius:var(--r);padding:6px 0;font-size:12px;color:var(--ink)}
+    .drawer{grid-template-columns:1fr;width:100vw}
+    .drawer-left{border-right:none;border-bottom:1px solid rgba(44,62,80,.25)}
+    .topbar{padding:0 calc(10px + env(safe-area-inset-right)) 0 calc(10px + env(safe-area-inset-left));gap:8px}
+    .brand{font-size:14px}
+    .new-btn{width:34px;height:34px;padding:0;font-size:0;flex:none}
+    .new-btn::before{content:"＋";font-size:18px;line-height:1}
+  }
+  @media (min-width:769px){ .card .ops{display:none} .lane-body{display:block} }
+
+  @media (prefers-reduced-motion:reduce){
+    .agent-run::before{animation:none}
+    .lane-head .chev{transition:none}
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="dot"></span>Task Board</div>
+  <select class="proj-select" aria-label="选择项目">
+    <option>全部项目</option><option selected>Task Board</option><option>个人博客</option>
+  </select>
+  <span class="spacer"></span>
+  <button class="icon-btn" title="额度">💰</button>
+  <button class="icon-btn" title="公网分享">🌐</button>
+  <button class="icon-btn" title="设置">⚙</button>
+  <button class="new-btn">＋ 新建任务</button>
+</header>
+
+<main class="board" aria-label="任务看板">
+
+  <section class="lane open" data-cat="backlog">
+    <div class="lane-head"><span class="lane-name">待规划</span><span class="lane-count">2</span>
+      <button class="lane-add" title="新建">＋</button><span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">支持任务标签系统</div>
+        <div class="meta"><span class="tag pri-high">高</span><span class="tag">Task Board</span><span class="num">#21</span></div>
+        <div class="ops"><button>移到待办</button><button>详情</button></div>
+        <div class="foot">创建于 08-10</div>
+      </article>
+      <article class="card">
+        <div class="title">看板搜索与过滤</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag">Task Board</span><span class="num">#22</span></div>
+        <div class="ops"><button>移到待办</button><button>详情</button></div>
+        <div class="foot">创建于 08-11</div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane open" data-cat="todo">
+    <div class="lane-head"><span class="lane-name">待办</span><span class="lane-count">1</span>
+      <button class="lane-add" title="新建">＋</button><span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">执行输出弹框支持一键复制</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag">Task Board</span><span class="num">#19</span></div>
+        <div class="ops"><button>开始执行</button><button>详情</button></div>
+        <div class="foot">等待 Agent 认领</div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane open" data-cat="doing">
+    <div class="lane-head"><span class="lane-name">进行中</span><span class="lane-count">1</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card" onclick="toggleDrawer(true)">
+        <div class="title">界面设计</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag">Task Board</span><span class="num">#18</span></div>
+        <div class="meta" style="margin-top:6px"><span class="agent-run">kimi · 02:41</span></div>
+        <div class="ops"><button>查看输出</button><button>停止</button></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane open" data-cat="review">
+    <div class="lane-head"><span class="lane-name">待验收</span><span class="lane-count">2</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">评论支持附图</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag">Task Board</span><span class="num">#15</span></div>
+        <div class="ops"><button>验收通过</button><button>打回重做</button></div>
+        <div class="foot">kimi 交付 · 等待你验收</div>
+      </article>
+      <article class="card crashed">
+        <div class="title">隧道断开自动重连</div>
+        <div class="meta"><span class="tag pri-high">高</span><span class="tag">Task Board</span><span class="num">#17</span></div>
+        <div class="meta" style="margin-top:6px"><span class="crash-badge">✕ 异常退出 · reasonix code=1</span></div>
+        <div class="ops"><button>查看输出</button><button>重新执行</button></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane open" data-cat="done">
+    <div class="lane-head"><span class="lane-name">已完成</span><span class="lane-count">1</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card done-card">
+        <span class="stamp"><small>ARCHIVED</small>已验收</span>
+        <div class="title">三家额度查询面板</div>
+        <div class="meta"><span class="tag pri-normal">普通</span><span class="tag">Task Board</span><span class="num">#12</span></div>
+        <div class="meta" style="margin-top:6px"><span class="done-mark">✓ 已验收 · codex</span></div>
+        <div class="ops"><button>详情</button></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane blocked-lane open" data-cat="side">
+    <div class="lane-head"><span class="lane-name">阻塞</span><span class="lane-count">1</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card">
+        <div class="title">移动端卡片拖拽排序</div>
+        <div class="meta"><span class="tag pri-low">低</span><span class="tag">Task Board</span><span class="num">#20</span>
+          <span class="q-note">[提问] 等待答复</span></div>
+        <div class="ops"><button>去答复</button><button>详情</button></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="lane canceled-lane" data-cat="side">
+    <div class="lane-head"><span class="lane-name">已取消</span><span class="lane-count">1</span>
+      <span class="chev">›</span></div>
+    <div class="lane-body">
+      <article class="card" style="opacity:.55">
+        <div class="title" style="text-decoration:line-through">旧版 UI 下线</div>
+        <div class="meta"><span class="tag">Task Board</span><span class="num">#9</span></div>
+        <div class="ops"><button>删除</button><button>详情</button></div>
+      </article>
+    </div>
+  </section>
+
+</main>
+
+<!-- 详情抽屉 -->
+<div class="backdrop hidden" id="backdrop" onclick="toggleDrawer(false)"></div>
+<aside class="drawer hidden" id="drawer" aria-label="任务详情">
+  <button class="drawer-close" onclick="toggleDrawer(false)">×</button>
+  <div class="drawer-left">
+    <div class="d-id">#18 · Task Board</div>
+    <div class="d-title">界面设计</div>
+    <div class="prop"><span class="k">状态</span><span class="v">进行中</span></div>
+    <div class="prop"><span class="k">优先级</span><span class="v">普通</span></div>
+    <div class="prop"><span class="k">执行 Agent</span><span class="v">kimi · 02:41</span></div>
+    <div class="prop"><span class="k">创建时间</span><span class="v">2026-08-11 20:33</span></div>
+    <div class="d-sec">描述</div>
+    <div class="d-desc">找一个工具或者 skill，设计几套适用于 Task Board 的界面原型。
+
+验收标准
+1. docs/prototypes/ 下产出 3 套风格不同的原型，浏览器直接打开可预览；
+2. 每套含桌面五列泳道 + 移动端（≤768px）纵向手风琴，移动端不依赖拖拽/悬停；
+3. 覆盖核心元素：泳道、任务卡片、详情抽屉、执行/停止按钮；
+4. 附 README 索引说明风格定位与打开方式。</div>
+    <div class="d-sec">流转</div>
+    <div class="flow-btns">
+      <button class="flow-btn">回待规划（停止执行）</button>
+      <button class="flow-btn primary">提交验收 →</button>
+    </div>
+  </div>
+  <div class="drawer-right">
+    <div class="comments">
+      <div class="comment">
+        <div class="c-head"><span class="c-author user">user</span><span class="c-time">20:33</span></div>
+        <div class="c-body">找一个工具或者 skill，给我设计几套适用于 Task board 的界面原型</div>
+      </div>
+      <div class="comment">
+        <div class="c-head"><span class="c-author runner">[runner]</span><span class="c-time">20:35</span></div>
+        <div class="c-body">kimi 正常结束，用时 100s（输出尾部略）</div>
+      </div>
+      <div class="comment ask">
+        <div class="c-head"><span class="c-author agent">agent</span><span class="c-time">20:35</span></div>
+        <div class="c-body">[提问] 描述中没有验收标准。草案：1. 3 套原型……请确认。</div>
+      </div>
+      <div class="comment">
+        <div class="c-head"><span class="c-author user">user</span><span class="c-time">20:55</span></div>
+        <div class="c-body">1</div>
+      </div>
+    </div>
+    <div class="composer">
+      <textarea placeholder="写下评论、验收意见或对 [提问] 的答复…"></textarea>
+      <div class="composer-row">
+        <button class="btn primary">发表评论</button>
+        <span class="spacer"></span>
+        <button class="btn">⚡ 执行</button>
+        <button class="btn">💬 问答</button>
+        <button class="btn danger">■ 停止</button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<script>
+  // 原型演示用：手风琴展开/收起 + 抽屉开关，零依赖
+  document.querySelectorAll('.lane-head').forEach(function(h){
+    h.addEventListener('click',function(e){
+      if(e.target.classList.contains('lane-add'))return;
+      if(window.innerWidth<=768)h.parentElement.classList.toggle('open');
+    });
+  });
+  function toggleDrawer(open){
+    document.getElementById('drawer').classList.toggle('hidden',!open);
+    document.getElementById('backdrop').classList.toggle('hidden',!open);
+  }
+  if(location.hash==='#drawer')toggleDrawer(true);
+  document.querySelectorAll('.card').forEach(function(c){
+    c.addEventListener('click',function(){
+      if(window.innerWidth>768&&!c.querySelector('.ops'))toggleDrawer(true);else toggleDrawer(true);
+    });
+  });
+</script>
+</body>
+</html>

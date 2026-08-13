@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>执行中卡片样式 · 软木板主题 Demos · Taskpin</title>
+<style>
+  /* 执行中卡片变体 —— 沿用当前线上「软木板 / 便利贴」主题（public/style.css 落地自 proto-l-cork）。
+     设计 token 与卡片/列头结构直接从 style.css 复制，保证 demo 与线上观感一致。 */
+  :root {
+    color-scheme: light;
+    --cork: #c89866; --cork-dark: #a87a4e; --wood: #7d5c3a; --wood2: #6b4c2e;
+    --cream: #f7edd8;
+    --note-pink: #ffd1dc;
+    --pin: #d93a2b; --pin-hi: #ff6b5b; --pin-dark: #b02a1e;
+    --ink: #4a3f30; --ink2: #7a6a52; --ink3: #9a8a70;
+    --c-in_progress: #b3452e;
+    --hand: "Marker Felt", "Chalkboard SE", "Comic Sans MS", cursive;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --cork: #4a3524; --cork-dark: #3a2917; --wood: #3d2b1a; --wood2: #2e2012;
+    --cream: #e8dcc2;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    background-color: var(--cork);
+    background-image:
+      radial-gradient(circle at 25% 15%, rgba(255, 236, 200, 0.14), transparent 55%),
+      radial-gradient(circle at 80% 90%, rgba(120, 80, 45, 0.12), transparent 55%),
+      radial-gradient(rgba(122, 84, 50, 0.16) 1.2px, transparent 1.5px),
+      radial-gradient(rgba(255, 240, 214, 0.12) 1px, transparent 1.3px),
+      repeating-linear-gradient(0deg, rgba(120, 80, 45, 0.05) 0 2px, transparent 2px 9px),
+      repeating-linear-gradient(90deg, rgba(120, 80, 45, 0.045) 0 2px, transparent 2px 11px);
+    background-size: auto, auto, 26px 26px, 37px 37px, auto, auto;
+    color: var(--ink); font-size: 14px; line-height: 1.55; min-height: 100vh;
+  }
+  [data-theme="dark"] body {
+    background-image:
+      radial-gradient(circle at 25% 15%, rgba(255, 236, 200, 0.05), transparent 55%),
+      radial-gradient(circle at 80% 90%, rgba(0, 0, 0, 0.18), transparent 55%),
+      radial-gradient(rgba(0, 0, 0, 0.22) 1.2px, transparent 1.5px),
+      radial-gradient(rgba(255, 240, 214, 0.05) 1px, transparent 1.3px),
+      repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.08) 0 2px, transparent 2px 9px),
+      repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.07) 0 2px, transparent 2px 11px);
+  }
+
+  /* ---------- 顶栏（仿线上木框条） ---------- */
+  #topbar {
+    display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 14px;
+    background: linear-gradient(var(--wood), var(--wood2));
+    border-bottom: 2px solid rgba(60, 40, 20, 0.35);
+    box-shadow: 0 2px 6px rgba(60, 40, 20, 0.3);
+    position: sticky; top: 0; z-index: 20; color: var(--cream);
+  }
+  .brand { font-weight: 650; font-size: 15px; letter-spacing: 0.2px; }
+  #topbar .back { color: var(--cream); font-size: 12.5px; text-decoration: none; opacity: 0.85; }
+  #topbar .back:hover { text-decoration: underline; }
+  #theme-btn {
+    margin-left: auto; border: 1px solid rgba(247, 237, 216, 0.3);
+    background: rgba(255, 255, 255, 0.06); color: var(--cream);
+    border-radius: 4px; min-width: 32px; height: 32px; padding: 0 10px; cursor: pointer;
+  }
+  #theme-btn:hover { background: rgba(255, 255, 255, 0.16); }
+  .intro { padding: 16px 16px 0; font-size: 12.5px; color: rgba(247, 237, 216, 0.85); text-shadow: 0 1px 1px rgba(60,40,20,0.35); }
+
+  /* ---------- 泳道：每格一个变体 ---------- */
+  #board {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 18px 14px; padding: 14px 16px 40px; align-items: start;
+  }
+  .column-header {
+    display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px;
+    margin: 0 6px 14px; padding: 7px 12px; position: relative;
+    transform: rotate(-0.5deg);
+    background: linear-gradient(rgba(255, 250, 230, 0.82), rgba(243, 234, 206, 0.72));
+    box-shadow: 0 2px 3px rgba(60, 40, 20, 0.3), inset 0 0 12px rgba(255, 255, 255, 0.35);
+  }
+  .column-header .name { font-family: var(--hand); font-size: 16px; letter-spacing: 0.5px; color: var(--c-in_progress); white-space: nowrap; }
+  .variant-note { flex-basis: 100%; font-size: 11px; color: var(--ink3); font-style: italic; margin-top: -2px; }
+
+  /* ---------- 卡片基座：便利贴 + 图钉（与线上 .card 一致） ---------- */
+  .card {
+    position: relative; border-radius: 2px; padding: 20px 12px 10px; margin: 0 2px 16px;
+    color: var(--ink); background: var(--note-pink);
+    box-shadow: 0 1px 1px rgba(60, 40, 20, 0.18), 0 9px 9px -6px rgba(60, 40, 20, 0.5);
+    transform: rotate(var(--rot, 0deg));
+    transition: transform 0.16s ease, box-shadow 0.16s ease;
+  }
+  .card:hover {
+    transform: rotate(0deg) scale(1.02);
+    box-shadow: 0 2px 2px rgba(60, 40, 20, 0.2), 0 14px 16px -8px rgba(60, 40, 20, 0.55);
+    z-index: 2;
+  }
+  .card::before { /* 图钉 */
+    content: ""; position: absolute; top: -7px; left: 50%; margin-left: -7px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, var(--pin-hi), var(--pin) 55%, var(--pin-dark));
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.35), 1px 4px 4px rgba(60, 40, 20, 0.45);
+  }
+  .card .title-row { display: flex; gap: 7px; align-items: flex-start; }
+  .card .prio { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; box-shadow: 0 1px 1px rgba(60,40,20,0.3); }
+  .prio.high { background: var(--pin); }
+  .prio.normal { background: rgba(74, 63, 48, 0.35); }
+  .card .title { flex: 1; font-family: var(--hand); font-size: 15.5px; line-height: 1.35; overflow-wrap: break-word; }
+  .card .meta {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    font-size: 11.5px; color: var(--ink2); margin-top: 7px; font-variant-numeric: tabular-nums;
+  }
+  .run-agent-name {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 5px;
+    border: none; background: none; padding: 2px 0; color: var(--pin-dark);
+    font-family: var(--hand); font-size: 14px; cursor: pointer; font-variant-numeric: tabular-nums;
+  }
+  .run-agent-name::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--pin); animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  .run-btn {
+    width: 32px; height: 32px; border-radius: 50%;
+    border: 1px solid var(--pin-dark); background: rgba(255, 255, 255, 0.35);
+    color: var(--pin-dark); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;
+  }
+  .run-btn .stop-ic { width: 9px; height: 9px; background: currentColor; border-radius: 2px; }
+
+  /* ================= 变体 A：图钉呼吸发光（线上现状，基线） ================= */
+  .v-a .card.running::before { animation: pin-pulse 1.6s ease-in-out infinite; }
+  @keyframes pin-pulse {
+    50% { box-shadow: 0 1px 1px rgba(0,0,0,0.35), 1px 4px 4px rgba(60,40,20,0.45), 0 0 10px 3px rgba(217, 58, 43, 0.55); }
+  }
+
+  /* ================= 变体 B：红色缝线流动（marching ants 描边） ================= */
+  .v-b .card.running .stitch { position: absolute; inset: 4px; pointer-events: none; width: calc(100% - 8px); height: calc(100% - 8px); }
+  .v-b .card.running .stitch rect {
+    fill: none; stroke: var(--pin); stroke-width: 1.6; opacity: 0.75;
+    stroke-dasharray: 7 5; animation: stitch-run 1.1s linear infinite;
+  }
+  @keyframes stitch-run { to { stroke-dashoffset: -12; } }
+
+  /* ================= 变体 C：美纹胶带进度条（卡片顶部一条胶带，斜纹流动） ================= */
+  .v-c .card.running { padding-top: 26px; }
+  .v-c .card.running::after {
+    content: ""; position: absolute; top: 5px; left: 10px; right: 10px; height: 9px;
+    background:
+      repeating-linear-gradient(-45deg, rgba(217,58,43,0.85) 0 8px, rgba(255,209,220,0.9) 8px 16px);
+    background-size: 23px 100%;
+    box-shadow: 0 1px 1px rgba(60,40,20,0.25), inset 0 0 4px rgba(255,255,255,0.5);
+    opacity: 0.9;
+    animation: tape-flow 0.9s linear infinite;
+  }
+  @keyframes tape-flow { to { background-position: 23px 0; } }
+
+  /* ================= 变体 D：执行中印章（右上角圆形印章，缓慢旋转 + 盖印红边） ================= */
+  .v-d .card.running { box-shadow: 0 1px 1px rgba(60,40,20,0.18), 0 9px 9px -6px rgba(60,40,20,0.5), inset 0 0 0 1.5px rgba(217, 58, 43, 0.45); }
+  .v-d .card.running .stamp {
+    position: absolute; top: -12px; right: -8px; width: 46px; height: 46px;
+    border: 2px solid var(--pin); border-radius: 50%;
+    color: var(--pin); font-family: var(--hand); font-size: 12px;
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    background: rgba(255, 209, 220, 0.75);
+    transform: rotate(10deg);
+    animation: stamp-spin 6s linear infinite;
+    box-shadow: 0 1px 2px rgba(60,40,20,0.25);
+    line-height: 1.1; pointer-events: none;
+  }
+  .v-d .card.running .stamp::before {
+    content: ""; position: absolute; inset: 3px; border: 1px dashed var(--pin); border-radius: 50%; opacity: 0.7;
+  }
+  @keyframes stamp-spin { from { transform: rotate(10deg); } to { transform: rotate(370deg); } }
+
+  /* ================= 变体 E：悬摆（卡片挂在图钉上轻轻摆动，物理隐喻「正在动」） ================= */
+  .v-e .card.running {
+    transform-origin: 50% -7px;
+    animation: swing 2.4s ease-in-out infinite;
+  }
+  .v-e .card.running:hover { animation-play-state: paused; }
+  @keyframes swing {
+    0%, 100% { transform: rotate(0.8deg); }
+    50% { transform: rotate(-0.8deg); }
+  }
+
+  /* ================= 变体 F：图钉吊牌（图钉上垂一根红绳，吊着「执行中」小牌轻摆） ================= */
+  .v-f .card.running .hang-tag {
+    position: absolute; top: 3px; left: calc(50% + 11px);
+    transform-origin: top center;
+    background: var(--note-yellow); color: var(--pin-dark);
+    border: 1px solid rgba(74, 63, 48, 0.4); border-radius: 2px;
+    padding: 1px 6px; font-size: 10px; font-weight: 700; white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(60, 40, 20, 0.3);
+    animation: tag-swing 2s ease-in-out infinite;
+    pointer-events: none;
+  }
+  .v-f .card.running .hang-tag::before { /* 红绳 */
+    content: ""; position: absolute; bottom: 100%; left: 50%; margin-left: -0.75px;
+    width: 1.5px; height: 9px; background: var(--pin);
+  }
+  @keyframes tag-swing {
+    0%, 100% { transform: rotate(7deg); }
+    50% { transform: rotate(-7deg); }
+  }
+
+  /* ================= 变体 G：荧光笔扫过（标题上荧光黄高亮反复刷过，像有人正在标记） ================= */
+  .v-g .card.running .title {
+    background-image: linear-gradient(100deg, transparent 0%, rgba(255, 238, 130, 0.9) 42%, rgba(255, 238, 130, 0.9) 58%, transparent 100%);
+    background-size: 260% 100%;
+    background-repeat: no-repeat;
+    border-radius: 2px;
+    animation: hl-sweep 2.4s ease-in-out infinite;
+  }
+  @keyframes hl-sweep {
+    0% { background-position: 130% 0; }
+    60%, 100% { background-position: -30% 0; }
+  }
+
+  /* ================= 变体 H：手写省略号（meta 区「执行中…」三个点逐个点亮） ================= */
+  .v-h .card.running .doing {
+    font-family: var(--hand); font-size: 13px; color: var(--pin-dark); letter-spacing: 0.5px;
+  }
+  .v-h .card.running .doing i { font-style: normal; opacity: 0.2; animation: dot-blink 1.5s ease-in-out infinite; }
+  .v-h .card.running .doing i:nth-child(2) { animation-delay: 0.3s; }
+  .v-h .card.running .doing i:nth-child(3) { animation-delay: 0.6s; }
+  @keyframes dot-blink {
+    0%, 100% { opacity: 0.2; }
+    35% { opacity: 1; }
+  }
+
+  /* ================= 变体 I：卷角呼吸（右下角纸角卷起，露出软木板，卷角大小呼吸） ================= */
+  .v-i .card.running::after {
+    content: ""; position: absolute; right: 0; bottom: 0;
+    width: 24px; height: 24px;
+    background: linear-gradient(315deg, var(--cork) 49%, #ffe9ef 50%);
+    box-shadow: -2px -2px 4px rgba(60, 40, 20, 0.22);
+    animation: curl-breathe 2s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes curl-breathe {
+    0%, 100% { width: 20px; height: 20px; }
+    50% { width: 30px; height: 30px; }
+  }
+
+  /* ================= 变体 J：心跳缩放（整张便签轻轻「心跳」脉动，阴影同步加深，hover 暂停） ================= */
+  .v-j .card.running { animation: heartbeat 1.8s ease-in-out infinite; }
+  .v-j .card.running:hover { animation-play-state: paused; }
+  @keyframes heartbeat {
+    0%, 100% {
+      transform: rotate(var(--rot, 0deg)) scale(1);
+      box-shadow: 0 1px 1px rgba(60, 40, 20, 0.18), 0 9px 9px -6px rgba(60, 40, 20, 0.5);
+    }
+    14% {
+      transform: rotate(var(--rot, 0deg)) scale(1.028);
+      box-shadow: 0 2px 2px rgba(60, 40, 20, 0.2), 0 16px 18px -8px rgba(60, 40, 20, 0.6);
+    }
+    28% {
+      transform: rotate(var(--rot, 0deg)) scale(1);
+      box-shadow: 0 1px 1px rgba(60, 40, 20, 0.18), 0 9px 9px -6px rgba(60, 40, 20, 0.5);
+    }
+  }
+
+  @media (max-width: 768px) {
+    #board { display: block; padding: 12px 10px 32px; }
+    .column { margin-bottom: 10px; }
+    .column-header { margin: 0 0 10px; }
+    .card:hover { transform: rotate(var(--rot, 0deg)); }
+    .run-btn { width: 40px; height: 40px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .card, .card:hover { transition: none; }
+    .v-a .card.running::before, .v-b .card.running .stitch rect, .v-c .card.running::after,
+    .v-d .card.running .stamp, .v-e .card.running, .v-f .card.running .hang-tag,
+    .v-g .card.running .title, .v-h .card.running .doing i, .v-i .card.running::after,
+    .v-j .card.running, .run-agent-name::before { animation: none; }
+  }
+</style>
+</head>
+<body>
+<header id="topbar">
+  <span class="brand">📌 Taskpin · 执行中卡片样式</span>
+  <a class="back" href="./index.html">← demos 目录</a>
+  <button id="theme-btn" title="切换明暗主题">🌙</button>
+</header>
+<p class="intro">同一软木板主题下的 10 种「执行中」卡片处理。每张卡片均含线上同款元素：优先级点、标题、#id、agent 名 + 用时（点开输出弹框）、停止按钮。A 为线上现状基线。</p>
+
+<div id="board">
+
+  <section class="column v-a" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">A · 图钉呼吸</span>
+      <span class="variant-note">线上现状基线：签名图钉红光脉动，最小改动、与图钉元素同源</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:-1.2deg">
+        <div class="title-row"><span class="prio high"></span><span class="title">重写执行输出弹框的滚动逻辑</span></div>
+        <div class="meta"><span>#42</span><button class="run-agent-name">kimi · 3m 12s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-b" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">B · 缝线流动</span>
+      <span class="variant-note">红色虚线缝线沿卡片边缘行进，像手工缝纫进行时的线迹</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:0.9deg">
+        <svg class="stitch" preserveAspectRatio="none"><rect x="1" y="1" width="100%" height="100%" rx="2"/></svg>
+        <div class="title-row"><span class="prio normal"></span><span class="title">给评论流加按日期分组</span></div>
+        <div class="meta"><span>#38</span><button class="run-agent-name">codex · 11m 47s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-c" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">C · 胶带进度条</span>
+      <span class="variant-note">卡片顶部贴一条红白斜纹美纹胶带，斜纹流动暗示进行中</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:1.4deg">
+        <div class="title-row"><span class="prio high"></span><span class="title">额度接口失败时的重试与提示</span></div>
+        <div class="meta"><span>#45</span><button class="run-agent-name">reasonix · 58s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-d" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">D · 执行中印章</span>
+      <span class="variant-note">右上角圆形红章缓慢旋转 + 盖印红边，最醒目、适合多卡片扫视</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:-0.8deg">
+        <span class="stamp">执行<br>中</span>
+        <div class="title-row"><span class="prio normal"></span><span class="title">隧道域名持久化到设置表</span></div>
+        <div class="meta"><span>#33</span><button class="run-agent-name">kimi · 6m 03s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-e" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">E · 图钉悬摆</span>
+      <span class="variant-note">卡片以图钉为轴轻轻摆动，物理隐喻「这张便签正在动」，hover 暂停</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:0.5deg">
+        <div class="title-row"><span class="prio normal"></span><span class="title">移动端抽屉双栏改单列</span></div>
+        <div class="meta"><span>#51</span><button class="run-agent-name">codex · 2m 40s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-f" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">F · 图钉吊牌</span>
+      <span class="variant-note">图钉上垂一根红绳，吊着「执行中」小牌左右轻摆，卡片本身不动</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:-1.1deg">
+        <span class="hang-tag">执行中</span>
+        <div class="title-row"><span class="prio high"></span><span class="title">看板列支持自定义排序</span></div>
+        <div class="meta"><span>#57</span><button class="run-agent-name">kimi · 4m 26s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-g" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">G · 荧光笔扫过</span>
+      <span class="variant-note">荧光黄高亮条反复刷过标题，像有人正在用记号笔标记这张便签</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:1.0deg">
+        <div class="title-row"><span class="prio normal"></span><span class="title">评论支持 Markdown 代码块</span></div>
+        <div class="meta"><span>#60</span><button class="run-agent-name">codex · 8m 15s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-h" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">H · 手写省略号</span>
+      <span class="variant-note">meta 区手写体「执行中…」三个点逐个点亮，最克制的动效</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:-0.6deg">
+        <div class="title-row"><span class="prio low" style="background:rgba(74,63,48,0.18)"></span><span class="title">归档一年前的已完成任务</span></div>
+        <div class="meta"><span>#63</span><span class="doing">执行中<i>.</i><i>.</i><i>.</i></span><button class="run-agent-name">reasonix · 1m 05s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-i" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">I · 卷角呼吸</span>
+      <span class="variant-note">右下角纸角卷起露出软木板，卷角大小缓慢呼吸，仿佛有人正翻看</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:0.7deg">
+        <div class="title-row"><span class="prio high"></span><span class="title">任务搜索支持按项目过滤</span></div>
+        <div class="meta"><span>#66</span><button class="run-agent-name">kimi · 5m 51s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="column v-j" data-col="in_progress">
+    <div class="column-header">
+      <span class="name">J · 心跳缩放</span>
+      <span class="variant-note">整张便签轻「心跳」脉动、阴影同步加深，hover 暂停便于点击</span>
+    </div>
+    <div class="column-list">
+      <div class="card running" style="--rot:-1.5deg">
+        <div class="title-row"><span class="prio normal"></span><span class="title">执行输出支持 ANSI 颜色</span></div>
+        <div class="meta"><span>#70</span><button class="run-agent-name">codex · 13m 02s</button><button class="run-btn"><span class="stop-ic"></span></button></div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+  // 明暗主题切换（与线上 data-theme 机制一致）
+  const btn = document.getElementById('theme-btn');
+  btn.addEventListener('click', () => {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    document.documentElement.dataset.theme = dark ? '' : 'dark';
+    btn.textContent = dark ? '🌙' : '☀️';
+  });
+  // 缝线变体：SVG rect 用百分比尺寸时 dasharray 不随盒子缩放，用 JS 同步 viewBox
+  document.querySelectorAll('.v-b .stitch').forEach(svg => {
+    const card = svg.closest('.card');
+    const sync = () => {
+      const w = card.clientWidth - 8, h = card.clientHeight - 8;
+      svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      const r = svg.querySelector('rect');
+      r.setAttribute('width', Math.max(0, w - 2));
+      r.setAttribute('height', Math.max(0, h - 2));
+    };
+    sync();
+    new ResizeObserver(sync).observe(card);
+  });
+</script>
+</body>
+</html>
