@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   openDb, ensureDefaultProject, listProjects, createProject, updateProject, resolveMainDir,
-  listTasks, getTask, getTaskWithComments, createTask, claimTask, updateTask, addComment, setTaskLastRun, setTaskUsage, DbError,
+  listTasks, getTask, getTaskWithComments, createTask, claimTask, updateTask, addComment, setTaskLastRun, setTaskUsage, setTaskExecOpts, DbError,
 } from '../server/db.mjs';
 import { parseUsage } from '../server/runner.mjs';
 
@@ -96,6 +96,20 @@ test('状态机：非法跳转被拒绝', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('状态机：待验收可回退到待办/待规划', () => {
+  const db = freshDb();
+  const p = ensureDefaultProject(db);
+  const t = createTask(db, { projectId: p.id, title: 'r', status: 'todo' });
+  let cur = claimTask(db, t.id);
+  cur = updateTask(db, cur.id, { version: cur.version, status: 'in_review' });
+  cur = updateTask(db, cur.id, { version: cur.version, status: 'todo' });
+  assert.equal(cur.status, 'todo');
+  cur = claimTask(db, cur.id);
+  cur = updateTask(db, cur.id, { version: cur.version, status: 'in_review' });
+  cur = updateTask(db, cur.id, { version: cur.version, status: 'backlog' });
+  assert.equal(cur.status, 'backlog');
 });
 
 test('进入 done 必须由用户验收，验收后写结构化项目记忆', () => {
@@ -254,6 +268,22 @@ test('usage 上下文用量：写入/清除，不 bump version', () => {
 
   setTaskUsage(db, t.id, null);
   assert.equal(getTask(db, t.id).usage, null);
+});
+
+test('exec_opts 执行选项记忆：写入/清除，不 bump version', () => {
+  const db = freshDb();
+  const p = ensureDefaultProject(db);
+  const t = createTask(db, { projectId: p.id, title: 'task' });
+  assert.equal(t.exec_opts, null);
+
+  const opts = JSON.stringify({ agent: 'codex', model: 'gpt-x', effort: 'high', permission: 'read-only', at: new Date().toISOString() });
+  setTaskExecOpts(db, t.id, opts);
+  const after = getTask(db, t.id);
+  assert.equal(after.exec_opts, opts);
+  assert.equal(after.version, t.version); // 元数据不 bump version
+
+  setTaskExecOpts(db, t.id, null);
+  assert.equal(getTask(db, t.id).exec_opts, null);
 });
 
 test('parseUsage：codex / reasonix 输出解析，kimi 与无用量输出返回 null', () => {

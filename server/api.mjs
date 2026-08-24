@@ -4,7 +4,7 @@ import {
   createTask, updateTask, claimTask, addComment, deleteTasks, getSettings, updateSettings,
   saveAttachments, DbError,
 } from './db.mjs';
-import { PROMPT_DEFAULTS, AUTO_CLAIM_PROMPT } from './runner.mjs';
+import { PROMPT_DEFAULTS, AUTO_CLAIM_PROMPT, getAgentOptions } from './runner.mjs';
 import { readFile } from 'node:fs/promises';
 import { join, normalize } from 'node:path';
 
@@ -94,6 +94,10 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
       // 执行 prompt 模板的内置默认值（设置页展示/恢复默认用）+ 自动认领提示词
       if (req.method === 'GET' && url.pathname === '/api/prompt-defaults') {
         return sendJson(res, 200, { ...PROMPT_DEFAULTS, auto_claim: AUTO_CLAIM_PROMPT });
+      }
+      // 各 agent 可选的模型/思考/权限（执行弹框联动选项；模型清单读各家 CLI 本地配置，后端统一下发）
+      if (req.method === 'GET' && url.pathname === '/api/agent-options') {
+        return sendJson(res, 200, getAgentOptions());
       }
       // projects
       if (req.method === 'GET' && url.pathname === '/api/projects') {

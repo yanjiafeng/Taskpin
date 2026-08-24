@@ -13,7 +13,7 @@ const TRANSITIONS = {
   todo: ['in_progress', 'backlog', 'canceled'],
   in_progress: ['in_review', 'blocked', 'todo', 'backlog', 'canceled'],
   blocked: ['in_progress', 'todo', 'canceled'],
-  in_review: ['done', 'in_progress', 'canceled'],
+  in_review: ['done', 'in_progress', 'todo', 'backlog', 'canceled'],
   done: ['todo', 'backlog', 'canceled'],
   canceled: [],
 };
@@ -97,6 +97,10 @@ export function openDb(dbPath = defaultDbPath()) {
   // 迁移：最近一次执行从 agent 输出解析到的上下文用量（JSON {agent, tokens?|input_tokens?, output_tokens?, at}；NULL = 未解析到）
   if (!taskCols.includes('usage')) {
     db.exec('ALTER TABLE tasks ADD COLUMN usage TEXT');
+  }
+  // 迁移：最近一次执行选用的模型/思考/权限（JSON {agent, model?, effort?, permission?, at}；NULL = 未执行过）
+  if (!taskCols.includes('exec_opts')) {
+    db.exec('ALTER TABLE tasks ADD COLUMN exec_opts TEXT');
   }
   return db;
 }
@@ -193,7 +197,7 @@ export function ensureDefaultProject(db) {
 
 // ---------- settings ----------
 
-export const AGENT_NAMES = ['codex', 'kimi', 'reasonix'];
+export const AGENT_NAMES = ['codex', 'kimi', 'reasonix', 'dsh'];
 // prompt_new/prompt_resume/prompt_qa：执行/问答 prompt 模板覆盖（null = 用 runner.mjs 的 PROMPT_DEFAULTS）
 // tunnel_url：最近一次 cloudflared 隧道域名（隧道断开后展示用，由 tunnel.mjs 写入）
 const SETTING_DEFAULTS = () => ({ agents: [...AGENT_NAMES], prompt_new: null, prompt_resume: null, prompt_qa: null, tunnel_url: null });
@@ -354,6 +358,12 @@ export function setTaskLastRun(db, id, lastRun) {
 // 元数据，不 bump version（同 last_run）。详情抽屉据此展示「上下文大小（来源：agent 会话输出）」。
 export function setTaskUsage(db, id, usage) {
   db.prepare('UPDATE tasks SET usage = ? WHERE id = ?').run(usage, id);
+}
+
+// 记录最近一次执行选用的 agent + 模型/思考/权限（JSON {agent, model?, effort?, permission?, at}）。
+// 元数据，不 bump version（同 usage）。执行弹框据此回填上一次的选择，卡片据此展示摘要。
+export function setTaskExecOpts(db, id, execOpts) {
+  db.prepare('UPDATE tasks SET exec_opts = ? WHERE id = ?').run(execOpts, id);
 }
 
 // 删除任务（评论随外键级联删除）。只允许已取消状态；批量在同一个事务里，任一不满足整体回滚。

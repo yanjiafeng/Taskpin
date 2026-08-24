@@ -11,7 +11,7 @@
 </p>
 
 ```
-你（浏览器/手机看板）                       Agent（Codex / Kimi / Reasonix）
+你（浏览器/手机看板）                       Agent（Codex / Kimi / Reasonix / DSH）
       |                                       |
       | 建任务、排进 todo                      | taskctl list --status todo
       v                                       v
@@ -24,13 +24,13 @@
 
 ## 特性
 
-- **多 Agent 执行**：从看板一键拉起 Codex / Kimi / Reasonix CLI 执行任务，可指定模型、思考强度、权限；不需要的 Agent 可在设置页停用
+- **多 Agent 执行**：从看板一键拉起 Codex / Kimi / Reasonix / DSH（DeepSeek Harness）执行任务，可指定模型、思考强度、权限；不需要的 Agent 可在设置页停用
 - **实时输出**：执行中卡片上的 agent 名/用时可点开输出弹框，实时滚动显示思考/输出流（3s 轮询，自动滚底）
 - **异常退出告警**：Agent 进程非零退出的任务卡片标红（⚠ 异常退出角标），下次执行或正常结束自动消除
 - **额度一览**：顶栏 💰 展开可隐藏的额度区——DeepSeek 钱包余额、Kimi 周额度/5h 窗口/Extra Usage、Codex 计费（OpenAI 标准接口，第三方中转站可能不支持）；全部走元数据接口、不消耗模型 token，60s 缓存
 - **问答模式**：执行前的需求澄清——Agent 只讨论不实现，通过评论来回问答，把需求/规则/验收标准写回任务描述；待规划/待办/阻塞可发起
 - **验收标准前置**：开发类任务没有「验收标准」时 Agent 不动手，给草案并进阻塞问你；交付时对照标准逐条自验证
-- **会话续跑**：打回重做时恢复原 CLI 会话（`codex exec resume` / `kimi -S` / `reasonix run --resume`），Agent 记得上轮细节；跨 Agent 靠评论继承记忆
+- **会话续跑**：打回重做时恢复原 CLI 会话（`codex exec resume` / `kimi -S` / `reasonix run --resume`），Agent 记得上轮细节；DSH 的 headless 模式不支持续跑（每次新会话），跨 Agent 同样靠评论继承记忆
 - **执行中提问**：Agent 遇到需要你决策的事会发 `[提问]` 评论并把任务置「阻塞」，抽屉里直接答复，「提交并继续」自动续跑会话
 - **项目记忆与规则**：任务验收进 `done` 时摘要追加到主目录 `TASKBOARD_MEMORY.md`；跨任务规则可沉淀到 `TASKBOARD_RULES.md`，执行和问答都会先读
 - **多项目**：每个项目可配多个仓库路径（查找范围）和一个主目录（工作目录）；「全部项目」总览视图
@@ -50,13 +50,13 @@ npm start            # 或 node server/index.mjs
 - 看板列：`待规划 / 待办 / 进行中 / 阻塞 / 待验收 / 已完成`，`已取消` 默认隐藏（设置页可开启显示）。
 - 桌面端可直接拖拽卡片改状态；手机端点卡片进详情，用状态按钮操作。
 - 删除：**只能删「已取消」的任务**。单个删除在任务详情（抽屉）的「🗑 删除任务」按钮（有确认）；「已取消」列头的 🗑 按钮批量删除当前视图下全部已取消任务。对应 API：`DELETE /api/tasks/:id`、`POST /api/tasks/batch-delete {ids}`（事务，混着未取消任务会整体失败）。
-- 状态机：`待规划 → 待办 → 进行中 → 待验收 → 已完成`；「进行中」可进「阻塞」（答复后回「待办」继续），各活动状态可进「已取消」（终态）。进「已完成」必须由用户验收，Agent 无法自判完成；「已完成」允许回退到「待办」「待规划」或取消。
+- 状态机：`待规划 → 待办 → 进行中 → 待验收 → 已完成`；「进行中」可进「阻塞」（答复后回「待办」继续），各活动状态可进「已取消」（终态）。进「已完成」必须由用户验收，Agent 无法自判完成；「待验收」可回退「进行中」（打回重做）或「待办」「待规划」（重新规划）；「已完成」允许回退到「待办」「待规划」或取消。
 - 数据默认在 `~/.codex-task-dashiboard/taskboard.sqlite`（`TASKBOARD_DB` 可覆盖）。
 - **评论可附图**：在评论框直接粘贴截图，或点 📎 从相册/文件选择（最多 6 张、单张 ≤8MB，png/jpg/gif/webp）。图片存数据库同目录的 `attachments/`，评论里显示缩略图（点击看原图）；Agent 执行时会从 `taskctl show` 拿到图片的本地绝对路径，可直接读图。
 
 ## 手机访问（内网穿透）
 
-顶栏 🌐 按钮（仅本机访问时显示）→「开始分享」即可：服务端拉起 `cloudflared` 快速隧道，弹框显示外网域名和 Token，「复制完整链接」得到带 `?token=` 的地址发给手机。「重新生成」换新域名，「停止」关隧道。隧道关闭后弹框仍显示上次使用的域名（标注已失效）。前提：主机已安装 `cloudflared`。对应 API：`GET /api/tunnel`、`POST /api/tunnel/start|stop|restart`。
+顶栏 🌐 按钮（仅本机访问时显示）→「开始分享」即可：服务端拉起 `cloudflared` 快速隧道，弹框显示外网域名和 Token，「复制完整链接」得到带 `#token=` 的地址（hash 形式，token 不出现在服务器日志里）发给手机。「重新生成」换新域名，「停止」关隧道。隧道关闭后弹框仍显示上次使用的域名（标注已失效）。前提：主机已安装 `cloudflared`。对应 API：`GET /api/tunnel`、`POST /api/tunnel/start|stop|restart`。
 
 <img src="docs/screenshot-share.png" width="60%" alt="公网分享对话框">
 
@@ -73,17 +73,18 @@ cloudflared tunnel --url http://127.0.0.1:47824
 TASKBOARD_TOKEN=你的随机长字符串 npm start
 ```
 
-本机浏览器用 `localhost` / `127.0.0.1` 打开时**免 Token**（按 HTTP Host 判断，隧道流量的 Host 是公网域名，照常校验）。手机经隧道访问时输入一次 Token 即可（存在 localStorage，或用 `?token=` 链接直接登录）。若想让局域网设备直连（不走隧道），用 `HOST=0.0.0.0 npm start`，仅在可信网络下这样做——同网段主机可伪造 `Host: localhost` 绕过 Token 校验。
+本机浏览器用 `localhost` / `127.0.0.1` 打开时**免 Token**（按 HTTP Host 判断，隧道流量的 Host 是公网域名，照常校验）。手机经隧道访问时输入一次 Token 即可（存在 localStorage，或用 `#token=` 链接直接登录，旧 `?token=` 链接也兼容）。若想让局域网设备直连（不走隧道），用 `HOST=0.0.0.0 npm start`，仅在可信网络下这样做——同网段主机可伪造 `Host: localhost` 绕过 Token 校验。
 
 ## 立即执行（从看板拉起 Agent）
 
-任务卡片右下角有 ▶ 按钮，点击后选择 **Codex**、**Kimi** 或 **Reasonix**（设置页可停用某个 Agent，停用后按钮隐藏且 API 拒绝执行，至少启用一个），并可指定模型、思考强度（Kimi 不生效）和权限（Kimi 不生效），服务端会在本机拉起对应 CLI 执行该任务：
+任务卡片右下角有 ▶ 按钮，点击后**先选择工具**（**Codex**、**Kimi**、**Reasonix** 或 **DSH**；设置页可停用某个 Agent，停用后按钮隐藏且 API 拒绝执行，至少启用一个），面板随即联动出该工具可用的**模型、思考强度、权限**下拉选项（清单由后端 `GET /api/agent-options` 统一下发：思考/权限是固定档位，模型读各家 CLI 本地配置——codex 取 `~/.codex/config.toml` 当前值、kimi 取 `~/.kimi-code/config.toml` 的 `[models.*]` 别名、reasonix 取 `~/.reasonix/config.toml` 的 `[[providers]]`；Kimi 的思考/权限不生效、DSH 的模型/思考不生效（模型在 dsh 自己的设置里配），对应行整行隐藏），选好后点「开始执行」，服务端在本机拉起对应 CLI 执行该任务。**每次执行选用的 agent + 模型/思考/权限会按任务记住**（`tasks.exec_opts`），下次打开执行面板自动回填上一次的选择；任务卡片显示「⚙ agent · 模型 · 思考 · 权限」摘要标签，任务明细属性栏显示「最近执行」一行（含时间）：
 
 <img src="docs/screenshot-run.png" width="60%" alt="立即执行面板">
 
-- Codex：`codex exec -s <权限> -C <项目主目录> --add-dir <看板数据库目录>`（沙箱内可写工作区和看板库；权限可选只读/工作区可写/完全开放，思考强度 `-c model_reasoning_effort=low|medium|high`）
-- Kimi：`kimi -p <prompt>`（此版本 kimi 的 `-p` 不能与 `--auto`/`-y` 组合，思考/权限选项不生效）
-- Reasonix：`reasonix run --dir <项目主目录> --permission-mode <模式> --add-dir <看板数据库目录> --output-format json`（权限选项映射：只读→plan、工作区可写→auto、完全开放→bypassPermissions，也可直接传 reasonix 的模式名；模型是 provider 名如 `deepseek-flash`/`deepseek-pro`）
+- Codex：`codex exec -s <权限> -C <项目主目录> --add-dir <看板数据库目录>`（沙箱内可写工作区和看板库；权限可选只读/工作区可写/完全开放/YOLO（`--dangerously-bypass-approvals-and-sandbox`，跳过审批且无沙箱，与 `-s`/`--add-dir` 互斥），思考强度 `-c model_reasoning_effort=low|medium|high`）
+- Kimi：`kimi -p <prompt>`（kimi 的 `-p` 不能与 `--auto`/`-y` 组合——0.36.0 实测报错；自动审批由 `~/.kimi-code/config.toml` 的 `default_permission_mode` 控制，看板侧不提供思考/权限选项）
+- Reasonix：`reasonix run --dir <项目主目录> --permission-mode <模式> --add-dir <看板数据库目录> --output-format stream-json`（stream-json 事件流让执行过程在输出弹框中可见：agent 发言 + 工具调用/结果逐条渲染，末尾同样带 `{"type":"result"}` 结果行用于成功判定与用量解析；权限选项映射：只读→plan、工作区可写→auto、完全开放→bypassPermissions，YOLO→bypassPermissions，也可直接传 reasonix 的模式名；模型是 provider 名如 `deepseek-flash`/`deepseek-pro`）
+- DSH（DeepSeek Harness）：`dsh --profile headless <prompt>`（一次性执行：新建会话、跑完把最终答复打 stdout，completed 退出码 0 否则 1。权限经 `DSH_PERMISSION_MODE` 环境变量下发，取值与 codex 沙箱同名，YOLO→danger-full-access，默认工作区可写；模型/思考在看板侧不生效——在 dsh 自己的设置里配；headless 不输出会话 id，**不支持续跑**，再执行自动新会话、靠评论继承记忆。执行过程输出由 `dsh-taskpin` 插件补齐：插件订阅 dsh 的 session 事件流，把 agent 发言、工具调用（▸）、工具结果（✓）实时写到 stderr，实时输出弹框即可看到过程（dsh headless 自身的 stdout 只在结束时有内容）。**回写看板优先用 `dsh-taskpin` 插件提供的 taskboard_show / taskboard_comment / taskboard_transition 原生工具**——沙箱内 taskctl 直写看板数据库会被权限拦截；插件在仓库 `dsh-taskpin/` 目录，用 `dsh plugin --profile headless add <路径>` 安装，看板地址默认 `http://127.0.0.1:47824`，可用 `TASKBOARD_API` 环境变量覆盖）
 - 工作目录 = 项目主目录；项目未配置主目录时自动创建 `~/<项目名>` 并使用
 - **执行即进「进行中」**：点击执行后任务自动流转到 `进行中`（待规划先经待办，阻塞/待验收直接流转；认领由看板自动完成，Agent 无需再 claim），卡片位置实时反映后台执行状态
 - 执行 prompt 内置了 manage-taskboard 协议（实现 → 自验证 → 交付待验收），且会先读主目录的 `TASKBOARD_MEMORY.md`（已验收任务的项目记忆）
@@ -93,13 +94,13 @@ TASKBOARD_TOKEN=你的随机长字符串 npm start
 - **验收标准前置**：开发类任务描述中没有「验收标准」时，Agent 不动手实现——给 2-4 条标准草案发 `[提问]` 并置「阻塞」，问答补齐后放回待办再执行；交付时对照标准逐条验证。点执行时若描述缺标准，面板会提示建议先问答（不拦截）
 - **提示词模板可自定义**：设置页 →「执行提示词模板」可查看/修改新会话、续跑、问答三个模板（占位符 `{{task_id}}` `{{tctl}}` `{{project_name}}` `{{scope}}` `{{claim_step}}`），留空或点「恢复默认」回到内置版本
 - **自动认领提示词**：设置页 →「自动认领提示词」一键复制，贴给终端里常驻的 Agent 会话，它会循环认领「待办」任务逐个执行（每 5 分钟空转检查一次）
-- 同一任务同时只允许一个执行（重复点击返回 409）；执行中的卡片显示 ■ 按钮可停止（SIGTERM）。**停止执行、或进程退出时任务仍停在「进行中」的，都会自动放回「待规划」**并写评论说明（Agent 已自行交付/提问流转的不打扰）
+- 同一任务同时只允许一个执行（重复点击返回 409）；执行中的卡片显示 ■ 按钮可停止（SIGTERM）。**停止执行、或进程退出时任务仍停在「进行中」的，都会自动放回「待规划」**并写评论说明（Agent 已自行交付/提问流转的不打扰）。**残留「进行中」自动回收**：运行跟踪在内存，服务重启/进程失联/启动失败会让任务停在「进行中」却没有活跃 run（卡片无执行中样式），看板启动时与每 30s 自动把它们放回「待规划」并写说明评论（正在跑的不打扰）；手动把卡片拖进「进行中」列会被拦截并提示走「执行」
 - 进程结束时自动在任务评论里追加一条 `[runner]` 记录（退出码、用时、输出尾部）；**非零退出的任务卡片会标红**（`tasks.last_run` 字段，新执行开始或正常结束时清除）
-- **上下文大小**：任务详情属性栏显示「上下文」一行——优先用最近一次执行从 agent 输出解析到的会话用量（`tasks.usage`：codex 的 `tokens used`、reasonix 结果行的 `usage`；kimi 无用量输出），没有则用任务描述+全部评论粗估；两种都标注统计来源
+- **上下文大小**：任务详情属性栏显示「上下文」一行——优先用最近一次执行从 agent 输出解析到的会话用量（`tasks.usage`：codex 的 `tokens used`、reasonix 结果行的 `usage`；kimi/dsh 无用量输出），没有则用任务描述+全部评论粗估；两种都标注统计来源
 - 执行中点击卡片上的 agent 名/用时：弹框实时滚动显示 Agent 输出（3s 轮询 `run/output` 接口，保留 64KB 尾部缓冲）；任务详情（左侧双栏抽屉）里也可直接发起执行/停止
-- 前提：主机已安装并登录 `codex` / `kimi` / `reasonix` CLI。运行状态在内存中，重启看板服务即丢失跟踪
+- 前提：主机已安装并登录 `codex` / `kimi` / `reasonix` / `dsh` CLI（dsh 即 `npm i -g @deepseek-ai/dsh`，凭据为 `~/.dsh/.env` 的 `DEEPSEEK_API_KEY`）。运行状态在内存中，重启看板服务即丢失跟踪（残留任务由上面的自动回收兜底）
 
-对应 API：`POST /api/tasks/:id/execute {agent, model?, effort?, permission?}`、`GET /api/runs`、`GET /api/tasks/:id/run/output`、`DELETE /api/tasks/:id/run`。
+对应 API：`POST /api/tasks/:id/execute {agent, model?, effort?, permission?}`、`GET /api/runs`、`GET /api/tasks/:id/run/output`、`DELETE /api/tasks/:id/run`、`GET /api/agent-options`（各 Agent 可选的思考/权限档位）。
 
 ## taskctl CLI
 
@@ -127,7 +128,7 @@ taskctl serve                               # 等同于 npm start
 
 项目可配置多个本地仓库路径（看板 ⚙ 设置页 → 项目 → 编辑，或 `project-update`，逗号分隔），这些路径合起来是 Agent 的默认查找范围（提示性质，不作沙箱限制）。每个项目还有一个**主目录**（可配置，默认自动创建 `~/<项目名>`），是 Agent 执行时的工作目录。任务验收进 `done` 时，看板会把任务摘要（标题、需求、Agent 结果、验收意见）按固定结构追加到主目录的 `TASKBOARD_MEMORY.md`，同一项目的记忆都汇总在这一个文件里。看板顶栏的项目下拉支持「全部项目」视图（默认），任务卡片以徽章标注所属项目；新建任务时可在弹窗中选择项目。
 
-## 接入 Agent（Codex / Kimi / Reasonix）
+## 接入 Agent（Codex / Kimi / Reasonix / DSH）
 
 把 Skill 安装到 Agent 的 skill 目录：
 
@@ -169,6 +170,7 @@ cp -r skills/manage-taskboard ~/.codex/skills/
 | POST | `/api/tasks/:id/execute` | 拉起 Agent（`agent, mode?: execute\|qa, model?, effort?, permission?`；qa 仅待规划/待办/阻塞） |
 | GET | `/api/runs` · DELETE `/api/tasks/:id/run` | 运行列表 / 停止执行 |
 | GET | `/api/tasks/:id/run/output` | 运行中任务的实时输出（未在运行返回 404） |
+| GET | `/api/agent-options` | 各 Agent 可选的模型/思考/权限（执行面板联动选项；模型读各家 CLI 本地配置） |
 | GET | `/api/quota?refresh=1` | 三家 Agent 额度/余额（60s 缓存，`refresh=1` 强制刷新） |
 | GET/PATCH | `/api/settings` | 全局设置（启用的 Agent、prompt 模板覆盖） |
 | GET | `/api/prompt-defaults` | 内置 prompt 模板 + 自动认领提示词 |
@@ -181,7 +183,7 @@ cp -r skills/manage-taskboard ~/.codex/skills/
 npm test             # node --test test/
 ```
 
-结构：`server/db.mjs`（schema + 状态机 + 乐观锁，server 与 CLI 共用）、`server/api.mjs` + `server/index.mjs`（REST + 静态 + SSE + Token 认证 + 数据库文件监听广播）、`server/runner.mjs`（Agent 执行器）、`server/quota.mjs`（三家额度查询）、`server/tunnel.mjs`（cloudflared 隧道管理）、`cli/taskctl.mjs`、`public/`（无构建前端）、`skills/manage-taskboard/`（Agent 协议）。更多约定见 [AGENTS.md](AGENTS.md)。
+结构：`server/db.mjs`（schema + 状态机 + 乐观锁，server 与 CLI 共用）、`server/api.mjs` + `server/index.mjs`（REST + 静态 + SSE + Token 认证 + 数据库文件监听广播）、`server/runner.mjs`（Agent 执行器）、`server/quota.mjs`（三家额度查询）、`server/tunnel.mjs`（cloudflared 隧道管理）、`cli/taskctl.mjs`、`public/`（无构建前端）、`skills/manage-taskboard/`（Agent 协议）、`dsh-taskpin/`（DSH 看板对接插件）。更多约定见 [AGENTS.md](AGENTS.md)。
 
 ## 灵感来源
 

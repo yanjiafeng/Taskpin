@@ -69,4 +69,4 @@ node /Users/eric/codex-task-dashiboard/cli/taskctl.mjs <command>
 - 认领前必须完整 `show`；不要只看标题就动手。
 - 更新必须带 `--if-version`。出现 `VERSION_CONFLICT` 时先重新 `show`，基于最新 version 重试；连续冲突则放弃并报告用户。
 - 不要并发认领多个任务；做完一个交付一个。
-- 验收被打回（`in_review → in_progress`）时，先读新评论里的反馈意见，修复后重新走交付流程。
+- 验收被打回（`in_review → in_progress`；用户也可能把待验收任务手动退回 `todo`/`backlog` 重新规划）时，先读新评论里的反馈意见，修复后重新走交付流程。

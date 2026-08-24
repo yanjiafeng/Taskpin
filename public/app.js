@@ -18,7 +18,7 @@ const TRANSITIONS = {
   todo: ['in_progress', 'backlog', 'canceled'],
   in_progress: ['in_review', 'blocked', 'todo', 'backlog', 'canceled'],
   blocked: ['in_progress', 'todo', 'canceled'],
-  in_review: ['done', 'in_progress', 'canceled'],
+  in_review: ['done', 'in_progress', 'todo', 'backlog', 'canceled'],
   done: ['todo', 'backlog', 'canceled'],
   canceled: [],
 };
@@ -28,6 +28,55 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
+// 轻量 markdown 渲染（评论正文用）：先整体转义防 XSS，再转换语法。
+// 支持：围栏/行内代码、标题(# ~ ####)、无序/有序列表、**加粗**、*斜体*、[链接](http(s)://…)。
+// 代码块/行内代码/链接先替换成占位符，避免被后续规则二次处理，结尾统一还原。
+function md(src) {
+  const raw = String(src ?? '');
+  if (!raw.trim()) return esc(raw);
+  const stash = [];
+  const keep = (html) => { stash.push(html); return `\u0001${stash.length - 1}\u0002`; };
+  let text = esc(raw);
+  text = text.replace(/```[^\n`]*\n?([\s\S]*?)```/g, (m, code) => keep(`<pre class="md-code"><code>${code.replace(/\n$/, '')}</code></pre>`));
+  text = text.replace(/`([^`\n]+)`/g, (m, code) => keep(`<code class="md-inline">${code}</code>`));
+  text = text.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, label, url) => keep(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`));
+  const inline = (s) => s
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(\S(?:[^*\n]*\S)?)\*/g, '<em>$1</em>');
+  const out = [];
+  let list = null; // 'ul' | 'ol' | null
+  const closeList = () => { if (list) { out.push(list === 'ul' ? '</ul>' : '</ol>'); list = null; } };
+  const isTableRow = (l) => /^\s*\|.*\|\s*$/.test(l);
+  const isTableSep = (l) => /^\s*\|[\s:|-]*-[\s:|-]*\|\s*$/.test(l);
+  const cells = (l) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim()));
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // 表格：| 表头 | 行 + | --- | 分隔行，后续连续的 | … | 行为数据行
+    if (isTableRow(line) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      closeList();
+      const head = cells(line);
+      const rows = [];
+      for (i += 2; i < lines.length && isTableRow(lines[i]); i++) rows.push(cells(lines[i]));
+      i--;
+      out.push(`<table class="md-table"><thead><tr>${head.map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+      continue;
+    }
+    const block = line.match(/^(\u0001\d+\u0002)\s*$/);
+    if (block) { closeList(); out.push(stash[+line.trim().slice(1, -1)]); continue; } // 占位符独占一行 = 代码块
+    const h = line.match(/^(#{1,4})\s+(.+)/);
+    if (h) { closeList(); out.push(`<div class="md-h md-h${h[1].length}">${inline(h[2])}</div>`); continue; }
+    const ul = line.match(/^\s*[-*]\s+(.+)/);
+    if (ul) { if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; } out.push(`<li>${inline(ul[1])}</li>`); continue; }
+    const ol = line.match(/^\s*\d+[.)]\s+(.+)/);
+    if (ol) { if (list !== 'ol') { closeList(); out.push('<ol>'); list = 'ol'; } out.push(`<li>${inline(ol[1])}</li>`); continue; }
+    closeList();
+    out.push(line.trim() === '' ? '<div class="md-gap"></div>' : `<div>${inline(line)}</div>`);
+  }
+  closeList();
+  return out.join('').replace(/\u0001(\d+)\u0002/g, (m, i) => stash[+i]);
+}
+
 const state = {
   projects: [],
   projectId: null, // null = 全部项目
@@ -35,7 +84,8 @@ const state = {
   runs: new Map(), // taskId -> {agent, pid, started_at}
   colToggles: {}, // 移动端手风琴：col -> true=固定展开 / false=固定折叠
   showCanceled: localStorage.getItem('taskboard_canceled') === '1',
-  settings: { agents: ['codex', 'kimi', 'reasonix'] }, // 服务端全局设置，loadSettings 覆盖
+  settings: { agents: ['codex', 'kimi', 'reasonix', 'dsh'] }, // 服务端全局设置，loadSettings 覆盖
+  agentOptions: null, // 各 agent 可选的思考/权限档位，loadAgentOptions 覆盖（GET /api/agent-options）
   promptDefaults: null, // 内置执行 prompt 模板（首次打开设置页时拉取）
   openTaskId: null,
   openTask: null, // 抽屉中任务详情（含 version、comments）
@@ -44,13 +94,21 @@ const state = {
 // ---------- Token 与 API ----------
 function getToken() { return localStorage.getItem('taskboard_token') || ''; }
 
-// 支持 ?token=xxx 链接直接登录：写入 localStorage 后从地址栏抹掉
+// 支持 ?token=xxx 与 #token=xxx 链接直接登录：写入 localStorage 后从地址栏抹掉
+// （#token= 是分享链接格式：hash 不发给服务器，只能在这里读出；?token= 保留兼容旧链接）
 (function adoptTokenFromUrl() {
-  const t = new URLSearchParams(location.search).get('token');
+  let t = new URLSearchParams(location.search).get('token');
+  const hashMatch = location.hash.match(/[#&]token=([^&]+)/);
+  if (!t && hashMatch) t = decodeURIComponent(hashMatch[1]);
   if (!t) return;
   localStorage.setItem('taskboard_token', t.trim());
   const url = new URL(location.href);
   url.searchParams.delete('token');
+  if (hashMatch) {
+    // 从 hash 中抹掉 token 参数，保留其余片段；抹完只剩 "#" 则清空
+    const clean = url.hash.replace(/#token=[^&]*&?/, '#').replace(/&token=[^&]*/, '');
+    url.hash = clean === '#' ? '' : clean;
+  }
   history.replaceState(null, '', url);
 })();
 
@@ -140,6 +198,12 @@ async function loadSettings() {
   syncAgentToggles();
 }
 
+// 各 agent 的模型/思考/权限清单由后端统一下发（GET /api/agent-options，读各家 CLI 本地配置）；
+// 拉取失败（如旧版服务进程没这个接口）时用 AGENT_OPTIONS_FALLBACK 兜底，保证选项行不消失
+async function loadAgentOptions() {
+  state.agentOptions = await api('/api/agent-options');
+}
+
 async function loadProjects() {
   state.projects = await api('/api/projects');
   if (state.projectId != null && !state.projects.some((p) => p.id === state.projectId)) {
@@ -161,6 +225,18 @@ async function loadTasks() {
   renderBoard();
   scheduleRunsPoll();
   if (state.openTaskId != null) await refreshDrawer();
+}
+
+// 变更重载统一入口：SSE 广播与本地操作成功后的显式刷新都走这里，300ms 内合并为一次
+// loadTasks——否则同一次变更（发评论/启动执行等）会被 SSE 和操作处理器各渲染一遍，
+// renderBoard 是整板 innerHTML 重建，两遍连着来就是肉眼可见的「闪一下」
+let reloadTimer = null;
+function scheduleReload() {
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    reloadTimer = null;
+    loadTasks().catch((err) => toast(err.message, 'error'));
+  }, 300);
 }
 
 // 有任务在执行时，每 3s 轮询运行状态；集合有变化（开始/完结）才整板重渲，
@@ -242,6 +318,9 @@ function cardHtml(t) {
   // 执行中样式只认任务状态：状态已离开「进行中」的（提问进阻塞/已交付等），
   // 即使进程尚未退出也不再闪——残留的 run 只保留一个停止入口（防进程挂死时无法杀）
   const live = Boolean(run) && t.status === 'in_progress';
+  // 停在「进行中」但没有活跃 run：执行中断/失联的残留态（服务端会自动回收回「待规划」，
+  // 此处先给个可见标记，避免它伪装成普通卡片）
+  const orphan = t.status === 'in_progress' && !run;
   const proj = state.projects.find((p) => p.id === t.project_id);
   const projBadge = proj ? `<span class="proj-badge">${esc(proj.name)}</span>` : '';
   // 上次执行异常退出的告警标记（新执行/正常结束由服务端清除）
@@ -251,6 +330,17 @@ function cardHtml(t) {
       const lr = JSON.parse(t.last_run);
       if (lr && lr.code !== 0) {
         failBadge = `<span class="fail-tag" title="上次 ${esc(lr.agent || '')} 执行异常退出${lr.code != null ? `（码 ${lr.code}）` : ''}${lr.error ? `：${esc(lr.error)}` : ''}">⚠ 异常退出</span>`;
+      }
+    } catch { /* 坏值忽略 */ }
+  }
+  // 上一次执行选用的 agent + 模型/思考/权限摘要（tasks.exec_opts，按任务记忆，执行开始时由服务端写入）
+  let execTag = '';
+  if (t.exec_opts && !live) {
+    try {
+      const eo = JSON.parse(t.exec_opts);
+      if (eo && eo.agent) {
+        const parts = [eo.agent, eo.model, eo.effort, eo.permission].filter(Boolean);
+        execTag = `<span class="exec-tag" title="上次执行：${esc(parts.join(' · '))}">⚙ ${esc(parts.join(' · '))}</span>`;
       }
     } catch { /* 坏值忽略 */ }
   }
@@ -264,11 +354,12 @@ function cardHtml(t) {
   return `
     <div class="card${live ? ' running' : ''}${failBadge ? ' run-failed' : ''}" draggable="true" data-id="${t.id}" style="--rot:${cardTilt(t.id)}deg">
       ${live ? '<span class="hang-tag">执行中</span>' : ''}
+      ${orphan ? '<span class="orphan-tag" title="任务停在「进行中」但没有活跃执行进程（执行中断/失联），将自动收回「待规划」">⚠ 执行中断</span>' : ''}
       <div class="title-row">
         <span class="prio ${esc(t.priority)}" title="优先级：${PRIORITY_LABEL[t.priority] || t.priority}"></span>
         <span class="title">${esc(t.title)}</span>
       </div>
-      <div class="meta"><span>#${t.id}</span>${projBadge}${comments ? `<span>${comments}</span>` : ''}${failBadge}${runBtn}</div>
+      <div class="meta"><span>#${t.id}</span>${projBadge}${comments ? `<span>${comments}</span>` : ''}${execTag}${failBadge}${runBtn}</div>
     </div>`;
 }
 
@@ -333,7 +424,7 @@ function renderBoard() {
         try {
           await api('/api/tasks/batch-delete', { method: 'POST', body: { ids } });
           toast(`已删除 ${ids.length} 个任务`);
-          await loadTasks();
+          scheduleReload();
         } catch (err) {
           toast(err.message, 'error');
         }
@@ -348,10 +439,10 @@ function renderBoard() {
         try {
           await api(`/api/tasks/${btn.dataset.stop}/run`, { method: 'DELETE' });
           toast('已发送停止信号');
-          await loadTasks();
+          scheduleReload();
         } catch (err) {
           toast(err.message, 'error');
-          await loadTasks();
+          scheduleReload();
         }
       });
     };
@@ -372,6 +463,12 @@ function renderBoard() {
       const task = state.tasks.find((t) => t.id === id);
       const target = col.dataset.col;
       if (!task || task.status === target) return;
+      // 「进行中」由执行自动认领：手动拖入会产生「in_progress 但无活跃 run」的残留任务
+      // （卡片没有执行中样式却停在进行中列），直接拦下并提示走「执行」
+      if (target === 'in_progress') {
+        toast('「进行中」由执行自动认领：请打开任务点「执行」按钮');
+        return;
+      }
       await moveTask(task, target);
     });
   });
@@ -391,19 +488,19 @@ async function moveTask(task, target) {
     task.status = oldStatus;
     renderBoard();
     toast(err.message, 'error');
-    await loadTasks();
+    scheduleReload();
   }
 }
 
 // ---------- 详情抽屉 ----------
 async function openDrawer(id) {
   state.openTaskId = id;
-  // 清掉上一个任务残留的抽屉 DOM：否则 renderDrawer 的草稿抢救会把
-  // 旧任务的标题/描述/评论草稿套到新打开的任务上
-  $('#drawer').innerHTML = '';
-  await refreshDrawer();
+  // 立即打开抽屉并显示图钉加载动画，避免点击卡片后「卡一下」的空白等待
+  $('#drawer').innerHTML =
+    '<div class="drawer-loading"><div class="load-note"></div><div class="load-text">正在打开任务…</div></div>';
   $('#drawer').classList.remove('hidden');
   $('#drawer-backdrop').classList.remove('hidden');
+  await refreshDrawer();
 }
 
 function closeDrawer() {
@@ -479,18 +576,80 @@ let outputTaskId = null;
 let outputTimer = null;
 let outputStick = true;
 
-// reasonix 输出是 JSON 事件行：尽量提取可读文本，解析失败保留原行；其他 agent 原样（去 ANSI）
+// reasonix 输出是 stream-json 事件流（v1.25.0 实测）：message（agent 完整发言）、
+// tool_dispatch（带 args 且非 partial/refreshed = 工具调用开始）、tool_result（工具结果，
+// 含 output/durationMs）、末尾 {"type":"result"} 结果行。reasoning/text 增量块、turn_*、
+// stream_attempt、usage、tool_progress 等只作过程心跳，不展示；
+// stdout/stderr 混刷的 warning:/INFO 日志（同一条会重复多次）照常滤掉
+const RX_NOISE = /^(warning: |\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} (INFO|WARN|WARNING|ERROR|DEBUG)\b)/;
+
+// tool.args 是 JSON 字符串：提取最典型的参数（命令/路径），提取不了就截断原文
+function rxToolArgs(tool) {
+  let args = tool.args;
+  if (typeof args === 'string') {
+    try {
+      const p = JSON.parse(args);
+      args = p.command ?? p.file_path ?? p.path ?? p.url ?? p.pattern ?? args;
+    } catch { /* 半截 JSON 直接截断 */ }
+  }
+  args = String(args ?? '').replace(/\s+/g, ' ').trim();
+  return args.length > 120 ? `${args.slice(0, 120)}…` : args;
+}
+
+// dsh 结束时会把最终答复再打一遍 stdout，与进度上报的最后一条发言同文且相邻，去掉尾部重复块
+function dedupeDshTail(lines) {
+  const n = lines.length;
+  for (let k = Math.floor(n / 2); k >= 1; k--) {
+    let same = true;
+    for (let i = 0; i < k; i++) {
+      if (lines[n - k + i] !== lines[n - 2 * k + i]) { same = false; break; }
+    }
+    if (same) return lines.slice(0, n - k);
+  }
+  return lines;
+}
+
 function formatRunOutput(agent, raw) {
   const lines = stripAnsi(raw).split('\n');
+  if (agent === 'dsh') return dedupeDshTail(lines).join('\n').trim();
   if (agent !== 'reasonix') return lines.join('\n').trim();
-  return lines.map((l) => {
-    if (!l.startsWith('{')) return l;
-    try {
-      const j = JSON.parse(l);
-      if (j.type === 'result') return j.result ?? l;
-      return j.text ?? j.content ?? j.message ?? l;
-    } catch { return l; }
-  }).join('\n').trim();
+  const out = [];
+  for (const l of lines) {
+    let text = null;
+    if (l.startsWith('{')) {
+      try {
+        const j = JSON.parse(l);
+        if (j.type === 'result') {
+          // 末尾结果行与最后一条 message 通常同文，避免重复显示
+          const r = j.result ?? null;
+          text = r && out[out.length - 1]?.text !== r ? r : null;
+        }
+        else if (j.kind === 'message') text = typeof j.text === 'string' ? j.text : null;
+        else if (j.kind === 'tool_dispatch') {
+          const t = j.tool;
+          if (t?.name && t.args != null && !t.partial && !t.refreshed) text = `▸ ${t.name} ${rxToolArgs(t)}`;
+        } else if (j.kind === 'tool_result') {
+          const t = j.tool;
+          if (t?.name) {
+            let o = typeof t.output === 'string' ? t.output.replace(/\s+/g, ' ').trim() : '';
+            if (o.length > 200) o = `${o.slice(0, 200)}…`;
+            text = `✓ ${t.name}${t.durationMs != null ? `（${t.durationMs}ms）` : ''}${o ? ` ${o}` : ''}`;
+          }
+        }
+        // 其余事件 kind 不展示
+      } catch { /* 截断的半行 JSON，按噪音丢弃 */ }
+      if (text === null) continue; // 未识别的 JSON 事件行（对象字段不可读），丢弃
+    }
+    if (text === null) {
+      if (RX_NOISE.test(l)) continue;
+      text = l;
+    }
+    if (!text.trim()) continue;
+    const last = out[out.length - 1];
+    if (last && last.text === text) last.n++;
+    else out.push({ text, n: 1 });
+  }
+  return out.map((e) => (e.n > 1 ? `${e.text}（×${e.n}）` : e.text)).join('\n').trim();
 }
 
 async function refreshOutputView() {
@@ -512,7 +671,7 @@ async function refreshOutputView() {
   }
   if (outputTaskId !== taskId) return; // 等待期间弹框已关闭/切换
   const term = $('#output-term');
-  term.textContent = formatRunOutput(run?.agent, output) || '启动中…';
+  term.textContent = formatRunOutput(run?.agent, output) || '运行中，暂无可显示输出…';
   if (outputStick) term.scrollTop = term.scrollHeight;
 }
 
@@ -574,7 +733,7 @@ function renderDrawer() {
     return `
     <div class="comment${isQuestion ? ' question' : ''}${c.author === 'user' ? ' from-user' : ''}">
       <div class="who"><span class="author ${esc(c.author)}">${c.author === 'agent' ? 'Agent' : '用户'}</span>${isQuestion ? '<span class="q-badge">等你答复</span>' : ''}<span>${esc(fmtLocal(c.created_at))}</span></div>
-      <div class="body">${esc(c.body)}</div>
+      <div class="body">${md(c.body)}</div>
       ${imgs ? `<div class="comment-imgs">${imgs}</div>` : ''}
     </div>`;
   };
@@ -620,6 +779,12 @@ function renderDrawer() {
           : '上下文：0（任务描述+评论为空）';
       })();
 
+  // 最近一次执行选用的 agent + 模型/思考/权限（tasks.exec_opts，按任务记忆）
+  const execOpts = (() => { try { return t.exec_opts ? JSON.parse(t.exec_opts) : null; } catch { return null; } })();
+  const execLine = execOpts?.agent
+    ? `最近执行：${[execOpts.agent, execOpts.model, execOpts.effort, execOpts.permission].filter(Boolean).join(' · ')}${execOpts.at ? `（${fmtLocal(execOpts.at)}）` : ''}`
+    : '';
+
   // 布局：左侧属性栏 + 右侧评论流（demo C 选定方向）；执行输出不在详情里，走卡片上的弹框
   $('#drawer').innerHTML = `
     <div class="drawer-head">
@@ -645,6 +810,7 @@ function renderDrawer() {
         ${acceptBtn}
         ${delBtn}
         <div class="version-info">version ${t.version}${t.thread_id ? ` · thread ${esc(t.thread_id)}` : ''} · 更新于 ${esc(fmtLocal(t.updated_at))}</div>
+        ${execLine ? `<div class="version-info">${esc(execLine)}</div>` : ''}
         <div class="version-info">${esc(contextLine)}</div>
       </div>
       <div class="d-comments-col">
@@ -699,7 +865,7 @@ function renderDrawer() {
       });
       state.openTask = { ...state.openTask, ...updated };
       toast('已保存');
-      await loadTasks();
+      scheduleReload();
     } catch (err) {
       toast(err.message, 'error');
       await refreshDrawer();
@@ -712,10 +878,10 @@ function renderDrawer() {
           method: 'PATCH',
           body: { version: state.openTask.version, status: btn.dataset.move, by: 'user' },
         });
-        await loadTasks();
+        scheduleReload();
       } catch (err) {
         toast(err.message, 'error');
-        await loadTasks();
+        scheduleReload();
       }
     });
   });
@@ -727,10 +893,10 @@ function renderDrawer() {
           body: { version: state.openTask.version, status: 'done', by: 'user' },
         });
         toast('已验收 ✓');
-        await loadTasks();
+        scheduleReload();
       } catch (err) {
         toast(err.message, 'error');
-        await loadTasks();
+        scheduleReload();
       }
     });
   });
@@ -749,7 +915,7 @@ function renderDrawer() {
         } catch (err) {
           toast(err.message, 'error');
         }
-        await loadTasks();
+        scheduleReload();
       });
     });
   });
@@ -764,7 +930,7 @@ function renderDrawer() {
         } catch (err) {
           toast(err.message, 'error');
         }
-        await loadTasks();
+        scheduleReload();
       });
     });
   });
@@ -782,10 +948,10 @@ function renderDrawer() {
         const agent = state.settings.agents.includes(threadAgent) ? threadAgent : state.settings.agents[0];
         await api(`/api/tasks/${t.id}/execute`, { method: 'POST', body: { agent, mode } });
         toast(`已提交答复，${agent} 继续中`);
-        await loadTasks();
+        scheduleReload();
       } catch (err) {
         toast(err.message, 'error');
-        await loadTasks();
+        scheduleReload();
       }
     });
   });
@@ -811,7 +977,7 @@ function renderDrawer() {
           body: { author: 'user', body, images: pendingImages },
         });
         pendingImages = [];
-        await loadTasks();
+        scheduleReload();
       } catch (err) {
         toast(err.message, 'error');
       }
@@ -895,7 +1061,60 @@ function renderSettingsProjects() {
 // ---------- 立即执行 / 问答 ----------
 let runTaskId = null;
 let runMode = 'execute'; // execute=实现任务；qa=问答（只讨论不实现）
+let runAgent = null; // 弹框里当前选中的执行工具（先选工具，再出对应可用的模型/思考/权限选项）
 const QA_STATUSES = ['backlog', 'todo', 'blocked']; // 问答只允许这三个状态发起
+
+// 思考/权限档位的显示名（值来自 GET /api/agent-options；reasonix 模式名直接用原名）
+const EFFORT_LABELS = { low: '低', medium: '中', high: '高' };
+const PERMISSION_LABELS = {
+  'read-only': '只读',
+  'workspace-write': '工作区可写',
+  'danger-full-access': '完全开放',
+  yolo: 'YOLO（跳过审批，无沙箱）',
+  bypassPermissions: 'bypassPermissions（YOLO）',
+};
+// agent-options 接口不可用（如旧版服务进程）时的回退档位——server/runner.mjs 的 AGENT_OPTIONS 副本，改动时两处同步
+const AGENT_OPTIONS_FALLBACK = {
+  codex: { efforts: ['low', 'medium', 'high'], permissions: ['read-only', 'workspace-write', 'danger-full-access', 'yolo'], models: [], defaultModel: null },
+  kimi: { efforts: [], permissions: [], models: [], defaultModel: null },
+  reasonix: { efforts: ['low', 'medium', 'high'], permissions: ['manual', 'ask', 'auto', 'acceptEdits', 'dontAsk', 'plan', 'bypassPermissions', 'yolo'], models: [], defaultModel: null },
+  dsh: { efforts: [], permissions: ['read-only', 'workspace-write', 'danger-full-access', 'yolo'], models: [], defaultModel: null },
+};
+
+function fillSelect(sel, values, labels, defaultText) {
+  const prev = sel.value;
+  sel.innerHTML = `<option value="">${esc(defaultText)}</option>`
+    + values.map((v) => `<option value="${esc(v)}">${esc(labels[v] || v)}</option>`).join('');
+  sel.value = values.includes(prev) ? prev : ''; // 之前的值在新清单里就保留，否则回默认
+}
+
+// 选中执行工具：按钮高亮 + 按该工具的清单联动重建模型/思考/权限选项（kimi 思考/权限不生效则整行隐藏）
+function selectRunAgent(agent) {
+  runAgent = agent;
+  document.querySelectorAll('.run-agent').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.agent === agent);
+  });
+  const opts = state.agentOptions?.[agent] || AGENT_OPTIONS_FALLBACK[agent];
+  const modelSel = $('#run-model');
+  // dsh 的模型在 dsh 自己的设置里配（headless 无 model 参数），看板侧隐藏模型行
+  $('#run-model-row').classList.toggle('hidden', agent === 'dsh');
+  const prevModel = modelSel.value;
+  modelSel.innerHTML = `<option value="">默认（${esc(opts.defaultModel || '读 CLI 配置')}）</option>`
+    + (opts.models || []).map((mo) => `<option value="${esc(mo.id)}">${esc(mo.label || mo.id)}</option>`).join('');
+  modelSel.value = (opts.models || []).some((mo) => mo.id === prevModel) ? prevModel : '';
+  $('#run-effort-row').classList.toggle('hidden', opts.efforts.length === 0);
+  fillSelect($('#run-effort'), opts.efforts, EFFORT_LABELS, '默认');
+  $('#run-permission-row').classList.toggle('hidden', opts.permissions.length === 0);
+  fillSelect($('#run-permission'), opts.permissions, PERMISSION_LABELS,
+    agent === 'reasonix' ? '默认（ask）' : '默认（工作区可写）');
+  syncRunGo();
+}
+
+function syncRunGo() {
+  const label = runAgent ? runAgent[0].toUpperCase() + runAgent.slice(1) : '';
+  $('#run-go').textContent = runMode === 'qa' ? `💬 用 ${label} 开始问答` : `▶ 用 ${label} 开始执行`;
+  $('#run-go').disabled = !runAgent;
+}
 
 function openRunSheet(taskId) {
   runTaskId = taskId;
@@ -904,11 +1123,26 @@ function openRunSheet(taskId) {
   $('#run-task-title').textContent = t ? `#${t.id} ${t.title}` : `#${taskId}`;
   // 状态不允许问答时藏起问答页签
   document.querySelector('[data-rmode="qa"]').classList.toggle('hidden', !(t && QA_STATUSES.includes(t.status)));
-  syncRunMode();
   // 只显示设置页启用的 Agent 按钮
   document.querySelectorAll('.run-agent').forEach((btn) => {
     btn.classList.toggle('hidden', !state.settings.agents.includes(btn.dataset.agent));
   });
+  // 回填该任务上一次执行的选择（按任务记忆，tasks.exec_opts）；没执行过则用第一个启用的 Agent + 全默认
+  let last = null;
+  try { last = JSON.parse(t?.exec_opts || 'null'); } catch { /* 坏值忽略 */ }
+  const agent = last?.agent && state.settings.agents.includes(last.agent) ? last.agent : state.settings.agents[0];
+  selectRunAgent(agent);
+  if (last?.model) {
+    const sel = $('#run-model');
+    // 上次用的模型不在当前清单里（自定义过/配置变了）：补一个选项让它能显示并回填
+    if (![...sel.options].some((o) => o.value === last.model)) {
+      sel.insertAdjacentHTML('beforeend', `<option value="${esc(last.model)}">${esc(last.model)}（上次使用）</option>`);
+    }
+    sel.value = last.model;
+  }
+  if (last?.effort) $('#run-effort').value = last.effort; // 不在当前工具档位里的会回默认
+  if (last?.permission) $('#run-permission').value = last.permission;
+  syncRunMode();
   $('#run-backdrop').classList.remove('hidden');
 }
 
@@ -918,11 +1152,7 @@ function syncRunMode() {
     b.classList.toggle('active', b.dataset.rmode === runMode);
   });
   $('#run-backdrop h2').textContent = runMode === 'qa' ? '问答（只讨论不实现）' : '立即执行';
-  document.querySelectorAll('.run-agent').forEach((btn) => {
-    const name = btn.dataset.agent;
-    const label = name[0].toUpperCase() + name.slice(1);
-    btn.textContent = runMode === 'qa' ? `💬 ${label} 问答` : `▶ ${label} 执行`;
-  });
+  syncRunGo();
   const hint = $('#run-hint');
   if (runMode === 'qa') {
     hint.textContent = '通过评论来回问答，澄清需求 / 规则 / 验收标准；结论由 Agent 写回任务描述，状态不动';
@@ -960,7 +1190,7 @@ async function refreshShare() {
   $('#share-stop').classList.toggle('hidden', !active);
   $('#share-regen').classList.toggle('hidden', s.state !== 'running');
   const copyBtn = $('#share-copy');
-  copyBtn.dataset.link = s.url ? (s.token ? `${s.url}?token=${s.token}` : s.url) : '';
+  copyBtn.dataset.link = s.url ? (s.token ? `${s.url}/#token=${encodeURIComponent(s.token)}` : s.url) : '';
   copyBtn.disabled = !s.url;
   clearInterval(shareTimer);
   shareTimer = s.state === 'starting' ? setInterval(refreshShare, 1000) : null;
@@ -1066,11 +1296,10 @@ function connectEvents() {
   const es = new EventSource(url);
   let timer = null;
   es.onmessage = () => {
+    // 任务/评论/项目变更：走统一去抖重载（与本地操作后的显式刷新合并，防同一次变更重渲两遍）
+    scheduleReload();
     clearTimeout(timer);
-    timer = setTimeout(() => {
-      loadTasks().catch((err) => toast(err.message, 'error'));
-      loadSettings().catch(() => { /* 设置拉取失败沿用本地状态 */ });
-    }, 300);
+    timer = setTimeout(() => loadSettings().catch(() => { /* 设置拉取失败沿用本地状态 */ }), 300);
   };
   es.onerror = () => {
     es.close();
@@ -1292,27 +1521,29 @@ function init() {
     b.onclick = () => { runMode = b.dataset.rmode; syncRunMode(); };
   });
   document.querySelectorAll('.run-agent').forEach((btn) => {
-    btn.onclick = () => withLoading(btn, async () => {
-      const agent = btn.dataset.agent;
-      const taskId = runTaskId;
-      const body = { agent, mode: runMode };
-      const model = $('#run-model').value.trim();
-      const effort = $('#run-effort').value;
-      const permission = $('#run-permission').value;
-      if (model) body.model = model;
-      if (effort) body.effort = effort;
-      if (permission) body.permission = permission;
-      try {
-        await api(`/api/tasks/${taskId}/execute`, { method: 'POST', body });
-        closeRunSheet();
-        // 从任务明细发起的执行：启动成功后顺手关掉明细页，回到看板看运行卡片
-        if (state.openTask?.id === taskId) closeDrawer();
-        toast(`已启动 ${agent} ${runMode === 'qa' ? '问答' : '执行'}任务 #${taskId}`);
-      } catch (err) {
-        toast(err.message, 'error');
-      }
-      await loadTasks();
-    });
+    btn.onclick = () => selectRunAgent(btn.dataset.agent); // 先选工具，选项联动，再点「开始」
+  });
+  $('#run-go').onclick = () => withLoading($('#run-go'), async () => {
+    if (!runAgent) return;
+    const agent = runAgent;
+    const taskId = runTaskId;
+    const body = { agent, mode: runMode };
+    const model = $('#run-model').value;
+    const effort = $('#run-effort').value;
+    const permission = $('#run-permission').value;
+    if (model) body.model = model;
+    if (effort) body.effort = effort;
+    if (permission) body.permission = permission;
+    try {
+      await api(`/api/tasks/${taskId}/execute`, { method: 'POST', body });
+      closeRunSheet();
+      // 从任务明细发起的执行：启动成功后顺手关掉明细页，回到看板看运行卡片
+      if (state.openTask?.id === taskId) closeDrawer();
+      toast(`已启动 ${agent} ${runMode === 'qa' ? '问答' : '执行'}任务 #${taskId}`);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+    scheduleReload();
   });
   $('#tf-cancel').onclick = closeTaskForm;
   $('#task-form').onsubmit = async (e) => {
@@ -1331,13 +1562,14 @@ function init() {
           },
         });
         closeTaskForm();
-        await loadTasks();
+        scheduleReload();
       } catch (err) {
         toast(err.message, 'error');
       }
     });
   };
 
+  loadAgentOptions().catch(() => { state.agentOptions = null; /* 弹框回退到内置档位副本 */ });
   loadSettings()
     .catch(() => { /* 首次拉取失败用默认（全部启用） */ })
     .then(() => loadProjects().catch((err) => toast(err.message, 'error')));

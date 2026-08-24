@@ -1,0 +1,16 @@
+{
+  "name": "dsh-taskpin",
+  "version": "0.1.0",
+  "description": "Taskpin 任务看板对接插件：为 dsh agent 提供 taskboard_show / taskboard_comment / taskboard_transition 原生工具",
+  "type": "module",
+  "main": "index.js",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.7"
+  },
+  "license": "MIT"
+}

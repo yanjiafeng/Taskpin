@@ -424,6 +424,34 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   clip-path: polygon(0 0, 100% 0, calc(100% - 6px) 50%, 100% 100%, 0 100%);
 }
 
+/* 残留「进行中」：任务停在「进行中」列但没有活跃执行进程（执行中断/失联），
+   服务端会自动收回「待规划」，自愈前先给个可见的警示标记避免伪装成普通卡片 */
+.orphan-tag {
+  display: inline-block;
+  background: var(--ink2);
+  color: #fff;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 2px 9px 2px 7px;
+  border-radius: 2px;
+  transform: rotate(-1.2deg);
+  box-shadow: 0 1px 2px rgba(60, 40, 20, 0.4);
+}
+
+/* 卡片上的「上次执行：agent · 模型 · 思考 · 权限」摘要（tasks.exec_opts） */
+.exec-tag {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ink2);
+  border: 1px dashed rgba(74, 63, 48, 0.35);
+  border-radius: 2px;
+  padding: 1px 5px;
+}
+
 /* 卡片上的执行控制（仅保留停止按钮：执行/删除已移到任务详情与列头） */
 .run-btn {
   margin-left: auto;
@@ -502,6 +530,50 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   box-shadow: 14px 0 40px rgba(50, 32, 14, 0.4);
   color: var(--ink);
   overscroll-behavior: contain;
+}
+/* 抽屉打开中的加载态：小便签 + 图钉按下弹起 */
+.drawer-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+}
+.drawer-loading .load-note {
+  position: relative;
+  width: 64px;
+  height: 56px;
+  border-radius: 2px;
+  background: var(--note-yellow);
+  box-shadow: 0 1px 1px rgba(60, 40, 20, 0.18), 0 8px 8px -6px rgba(60, 40, 20, 0.5);
+  animation: load-note-wobble 1.2s ease-in-out infinite;
+}
+.drawer-loading .load-note::before { /* 图钉 */
+  content: "";
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  margin-left: -8px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, var(--pin-hi), var(--pin) 55%, var(--pin-dark));
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.35), 1px 4px 4px rgba(60, 40, 20, 0.45);
+  animation: load-pin-press 1.2s ease-in-out infinite;
+}
+@keyframes load-note-wobble {
+  0%, 100% { transform: rotate(-2.5deg); }
+  50% { transform: rotate(2.5deg); }
+}
+@keyframes load-pin-press {
+  0%, 100% { transform: translateY(-5px) scale(1); }
+  50% { transform: translateY(0) scale(0.94); }
+}
+.drawer-loading .load-text {
+  font-family: var(--hand);
+  font-size: 15px;
+  color: var(--ink3);
 }
 #drawer .drawer-head {
   display: flex;
@@ -639,6 +711,40 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   border-radius: 2px;
   padding: 9px 12px;
 }
+/* 评论 markdown 渲染（app.js md() 的输出） */
+.comment .body .md-h { font-weight: 700; margin: 6px 0 2px; }
+.comment .body .md-h1 { font-size: 16px; }
+.comment .body .md-h2 { font-size: 15px; }
+.comment .body .md-h3, .comment .body .md-h4 { font-size: 13.5px; }
+.comment .body .md-gap { height: 6px; }
+.comment .body ul, .comment .body ol { margin: 3px 0; padding-left: 20px; }
+.comment .body li { margin: 1px 0; }
+.comment .body .md-code {
+  background: rgba(74, 63, 48, 0.08);
+  border: 1px solid rgba(122, 84, 50, 0.15);
+  border-radius: 3px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre;
+}
+.comment .body .md-inline {
+  background: rgba(74, 63, 48, 0.1);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.comment .body a { color: #2b6a8f; text-decoration: underline; }
+.comment .body .md-table { border-collapse: collapse; margin: 6px 0; font-size: 12.5px; }
+.comment .body .md-table th, .comment .body .md-table td {
+  border: 1px solid rgba(122, 84, 50, 0.3);
+  padding: 3px 8px;
+  text-align: left;
+}
+.comment .body .md-table th { background: rgba(122, 84, 50, 0.1); font-weight: 700; }
 .comment.question .body { border-left: 3px solid var(--amber); background: rgba(232, 163, 61, 0.12); }
 .comment.question .q-badge {
   color: #8a5a10;
@@ -776,6 +882,18 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 .run-sheet .btn { width: 100%; margin-top: 10px; }
 .run-task-title { color: var(--ink2); font-size: 13px; }
 .run-mode { display: flex; gap: 8px; margin-top: 12px; }
+.run-agents { display: flex; gap: 8px; margin-top: 12px; }
+.run-agents .run-agent {
+  flex: 1;
+  border: 1px solid rgba(74, 63, 48, 0.4);
+  background: var(--paper-field);
+  border-radius: 2px;
+  padding: 8px 0;
+  font-weight: 600;
+  color: var(--ink2);
+  cursor: pointer;
+}
+.run-agents .run-agent.active { background: var(--pin); border-color: var(--pin-dark); color: #fff; }
 .run-mode button {
   flex: 1;
   border: 1px solid rgba(74, 63, 48, 0.4);
@@ -1023,6 +1141,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   .card, .card:hover { transform: none; transition: none; }
   .btn { transition: none; }
   .btn:hover { transform: none; }
-  .card.running::after, .hang-tag, .run-agent-name::before { animation: none; }
+  .card.running::after, .hang-tag, .run-agent-name::before,
+  .drawer-loading .load-note, .drawer-loading .load-note::before { animation: none; }
   .column-header .chev { transition: none; }
 }

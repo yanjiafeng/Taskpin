@@ -192,7 +192,7 @@ test('删除项目：仅限没有未取消任务，任务与评论级联删除',
 test('settings：读取默认、局部更新、至少启用一个 Agent', async () => {
   // 默认全部启用
   const def = await req('GET', '/api/settings');
-  assert.deepEqual(def.data.agents, ['codex', 'kimi', 'reasonix']);
+  assert.deepEqual(def.data.agents, ['codex', 'kimi', 'reasonix', 'dsh']);
 
   // 局部更新并持久化
   const patched = await req('PATCH', '/api/settings', { agents: ['kimi'] });
@@ -212,7 +212,7 @@ test('settings：读取默认、局部更新、至少启用一个 Agent', async 
   // 非法请求不破坏已存配置
   const after = await req('GET', '/api/settings');
   assert.deepEqual(after.data.agents, ['kimi']);
-  await req('PATCH', '/api/settings', { agents: ['codex', 'kimi', 'reasonix'] }); // 恢复默认
+  await req('PATCH', '/api/settings', { agents: ['codex', 'kimi', 'reasonix', 'dsh'] }); // 恢复默认
 
   // 执行 prompt 模板：内置默认值端点 + 覆盖/校验/恢复
   const defs = await req('GET', '/api/prompt-defaults');
@@ -225,6 +225,29 @@ test('settings：读取默认、局部更新、至少启用一个 Agent', async 
   assert.equal(okTpl.data.prompt_new, '自定义 {{task_id}} 用 {{tctl}} 完成');
   const clearedTpl = await req('PATCH', '/api/settings', { prompt_new: null });
   assert.equal(clearedTpl.data.prompt_new, null); // 恢复内置默认
+});
+
+test('agent-options：各 agent 的模型/思考/权限由后端下发（模型读各家 CLI 本地配置）', async () => {
+  const r = await req('GET', '/api/agent-options');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.data.codex.efforts, ['low', 'medium', 'high']);
+  assert.deepEqual(r.data.codex.permissions, ['read-only', 'workspace-write', 'danger-full-access', 'yolo']);
+  assert.deepEqual(r.data.kimi.efforts, []); // kimi 思考/权限不生效
+  assert.deepEqual(r.data.kimi.permissions, []);
+  assert.deepEqual(r.data.reasonix.efforts, ['low', 'medium', 'high']);
+  assert.ok(r.data.reasonix.permissions.includes('bypassPermissions'));
+  assert.ok(r.data.reasonix.permissions.includes('yolo')); // YOLO = bypassPermissions 的显式别名
+  assert.deepEqual(r.data.dsh.efforts, []); // dsh headless 无 model/effort 参数（模型在 dsh 设置里配）
+  assert.deepEqual(r.data.dsh.permissions, ['read-only', 'workspace-write', 'danger-full-access', 'yolo']); // 经 DSH_PERMISSION_MODE 下发
+  // 模型清单读本机 CLI 配置（测试环境可能没有这些文件，只断言结构）：{id,label} 数组 + defaultModel
+  for (const agent of ['codex', 'kimi', 'reasonix', 'dsh']) {
+    assert.ok(Array.isArray(r.data[agent].models));
+    for (const mo of r.data[agent].models) {
+      assert.equal(typeof mo.id, 'string');
+      assert.equal(typeof mo.label, 'string');
+    }
+    assert.ok(r.data[agent].defaultModel === null || typeof r.data[agent].defaultModel === 'string');
+  }
 });
 
 test('删除任务：仅已取消，单个与批量（事务）', async () => {
@@ -349,6 +372,14 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     assert.equal(cargs[cargs.indexOf('-s') + 1], 'read-only');
     procs[2].proc.emit('exit', 0);
 
+    // 按任务记忆本次执行选项：exec_opts 落库（执行弹框回填 + 卡片展示）
+    const afterOpts = await rq('GET', `/api/tasks/${tid}`);
+    const execOpts = JSON.parse(afterOpts.data.exec_opts);
+    assert.equal(execOpts.agent, 'codex');
+    assert.equal(execOpts.model, 'gpt-x');
+    assert.equal(execOpts.effort, 'high');
+    assert.equal(execOpts.permission, 'read-only');
+
     // kimi：此版本 -p 不能与 --auto/-y 组合，固定为 kimi -p（permission 仅 codex 生效）
     await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'kimi', permission: 'yolo' });
     assert.ok(procs[3].args.includes('-p'));
@@ -392,7 +423,7 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     assert.ok(!procs[8].args.includes('resume'));
     procs[8].proc.emit('exit', 0);
 
-    // reasonix：run 子命令 + 沙箱名映射到 permission-mode + JSON 输出
+    // reasonix：run 子命令 + 沙箱名映射到 permission-mode + stream-json 事件流输出
     const rxHome = mkdtempSync(join(tmpdir(), 'tb-rxhome-'));
     process.env.REASONIX_HOME = rxHome; // 隔离会话文件查找，不碰真实 Reasonix home
     await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'reasonix', model: 'deepseek-pro', effort: 'high', permission: 'danger-full-access' });
@@ -402,9 +433,10 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     assert.equal(xargs[xargs.indexOf('--permission-mode') + 1], 'bypassPermissions'); // danger-full-access 映射
     assert.equal(xargs[xargs.indexOf('--model') + 1], 'deepseek-pro');
     assert.equal(xargs[xargs.indexOf('--effort') + 1], 'high');
-    assert.ok(xargs.includes('--output-format') && xargs.includes('json'));
+    assert.ok(xargs.includes('--output-format') && xargs.includes('stream-json')); // 事件流：执行过程可见
     assert.ok(!xargs.includes('--resume')); // todo 状态开新会话
-    // 模拟 JSON 结果行：捕获 session_id，定位会话文件后写 thread_id，评论提取 result 文本。
+    // 模拟 stream-json 输出：过程事件行（message/tool_dispatch/tool_result）+ 末尾结果行。
+    // 捕获 session_id，定位会话文件后写 thread_id，评论提取 result 文本。
     // 附带真实事故场景：结果行 subtype:success 但进程退出码为 1（reasonix 误报），
     // 应以结果行为准记「正常结束」，不打 last_run 异常标记
     const rsid = '20260805-120000.000000000-deepseek-v4-flash';
@@ -412,7 +444,13 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     mkdirSync(rsessDir, { recursive: true });
     const rsessFile = join(rsessDir, `${rsid}.jsonl`);
     writeFileSync(rsessFile, '{}\n');
-    procs[9].proc.stdout.emit('data', Buffer.from(`{"type":"result","subtype":"success","is_error":false,"result":"搞定了","session_id":"${rsid}"}\n`));
+    procs[9].proc.stdout.emit('data', Buffer.from(
+      '{"kind":"turn_started"}\n'
+      + '{"kind":"tool_dispatch","tool":{"id":"c1","name":"bash","args":"{\\"command\\": \\"echo hi\\"}","readOnly":false}}\n'
+      + '{"kind":"tool_result","tool":{"id":"c1","name":"bash","output":"hi\\n","durationMs":40}}\n'
+      + '{"kind":"message","text":"执行完成"}\n'
+      + `{"type":"result","subtype":"success","is_error":false,"result":"搞定了","session_id":"${rsid}"}\n`,
+    ));
     procs[9].proc.emit('exit', 1);
     const afterRx = await rq('GET', `/api/tasks/${tid}`);
     assert.equal(afterRx.data.thread_id, `reasonix:${rsessFile}`); // 存的是会话文件完整路径
@@ -429,6 +467,26 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     procs[10].proc.emit('exit', 0);
     delete process.env.REASONIX_HOME;
     rmSync(rxHome, { recursive: true, force: true });
+
+    // dsh（DeepSeek Harness）：headless 一次性执行；权限经 DSH_PERMISSION_MODE 环境变量下发
+    // （yolo → danger-full-access）；prompt 末尾带 taskboard 工具提示；headless 不输出会话 id
+    // → 不更新 thread_id（保持上一家 reasonix 的），再执行开新会话
+    await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'dsh', permission: 'yolo' });
+    assert.equal(procs[11].cmd, 'dsh');
+    assert.deepEqual(procs[11].args.slice(0, 2), ['--profile', 'headless']);
+    assert.equal(procs[11].opts.env.DSH_PERMISSION_MODE, 'danger-full-access');
+    assert.ok(procs[11].args[2].includes('taskboard_show'));
+    assert.ok(!procs[11].args.includes('--resume'));
+    procs[11].proc.stdout.emit('data', Buffer.from('完成了\n'));
+    procs[11].proc.emit('exit', 0);
+    const afterDsh = await rq('GET', `/api/tasks/${tid}`);
+    assert.ok(afterDsh.data.comments.some((c) => c.body.includes('[runner] dsh 正常结束')));
+    assert.ok(afterDsh.data.thread_id.startsWith('reasonix:')); // dsh 无会话 id 可存，不覆盖
+
+    // dsh 权限默认值与映射：workspace-write 默认；codex 沙箱名原样透传
+    await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'dsh' });
+    assert.equal(procs[12].opts.env.DSH_PERMISSION_MODE, 'workspace-write');
+    procs[12].proc.emit('exit', 0);
 
     rmSync(tmpMain, { recursive: true, force: true });
 
@@ -449,15 +507,15 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     const execDisabled = await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'kimi' });
     assert.equal(execDisabled.status, 403);
     assert.equal(execDisabled.data.error.code, 'AGENT_DISABLED');
-    await rq('PATCH', '/api/settings', { agents: ['codex', 'kimi', 'reasonix'] }); // 恢复
+    await rq('PATCH', '/api/settings', { agents: ['codex', 'kimi', 'reasonix', 'dsh'] }); // 恢复
 
     // prompt 模板覆盖：spawn 的 prompt 使用自定义模板并渲染占位符
     await rq('PATCH', '/api/settings', { prompt_new: 'CUSTOM-TPL 任务#{{task_id}} CLI={{tctl}} 范围：{{scope}}' });
     await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'kimi' });
-    const kprompt = procs[11].args[procs[11].args.indexOf('-p') + 1];
+    const kprompt = procs[13].args[procs[13].args.indexOf('-p') + 1];
     assert.ok(kprompt.startsWith('CUSTOM-TPL'));
     assert.ok(kprompt.includes(`任务#${tid}`) && !kprompt.includes('{{task_id}}'));
-    procs[11].proc.emit('exit', 0);
+    procs[13].proc.emit('exit', 0);
     await rq('PATCH', '/api/settings', { prompt_new: null }); // 恢复默认
 
     // 问答模式：状态不动、用 qa 模板；仅 待规划/待办/阻塞 可发起
@@ -466,9 +524,9 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     const qaStart = await rq('POST', `/api/tasks/${qid}/execute`, { agent: 'kimi', mode: 'qa' });
     assert.equal(qaStart.status, 202);
     assert.ok(qaStart.data.mode.includes('问答'));
-    const qprompt = procs[12].args[procs[12].args.indexOf('-p') + 1];
+    const qprompt = procs[14].args[procs[14].args.indexOf('-p') + 1];
     assert.ok(qprompt.includes('只讨论不实现'));
-    procs[12].proc.emit('exit', 0);
+    procs[14].proc.emit('exit', 0);
     const qaAfter = await rq('GET', `/api/tasks/${qid}`);
     assert.equal(qaAfter.data.status, 'backlog'); // 问答不自动流转状态
 
@@ -477,8 +535,8 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     assert.equal(badTpl.status, 400);
     await rq('PATCH', '/api/settings', { prompt_qa: 'QA-TPL #{{task_id}} {{tctl}}' });
     await rq('POST', `/api/tasks/${qid}/execute`, { agent: 'kimi', mode: 'qa' });
-    assert.ok(procs[13].args[procs[13].args.indexOf('-p') + 1].startsWith('QA-TPL'));
-    procs[13].proc.emit('exit', 0);
+    assert.ok(procs[15].args[procs[15].args.indexOf('-p') + 1].startsWith('QA-TPL'));
+    procs[15].proc.emit('exit', 0);
     await rq('PATCH', '/api/settings', { prompt_qa: null });
 
     // 进行中不能发起问答 -> 422（手动 PATCH 到 in_progress，无活动 run）；未知 mode -> 400
@@ -496,8 +554,88 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     // prompt-defaults 暴露 qa 模板
     const defs = await rq('GET', '/api/prompt-defaults');
     assert.ok(defs.data.qa.includes('只讨论不实现'));
+
+    // YOLO 模式：codex 跳过审批+无沙箱（与 -s/--add-dir 互斥）；reasonix 映射 bypassPermissions
+    await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'codex', permission: 'yolo' });
+    const yargs = procs[16].args;
+    assert.ok(yargs.includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(!yargs.includes('-s') && !yargs.includes('--add-dir'));
+    procs[16].proc.emit('exit', 0);
+    await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'reasonix', permission: 'yolo' });
+    const ryargs = procs[17].args;
+    assert.equal(ryargs[ryargs.indexOf('--permission-mode') + 1], 'bypassPermissions');
+    procs[17].proc.emit('exit', 0);
   } finally {
     srv.close();
+  }
+});
+
+test('残留「进行中」回收：启动时无活跃 run 的 in_progress 自动回待规划，正在跑的不打扰', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { openDb, createProject, createTask, updateTask } = await import('../server/db.mjs');
+  const tmpDir = mkdtempSync(join(tmpdir(), 'tb-stale-'));
+  const dbPath = join(tmpDir, 't.sqlite');
+
+  // 预置：模拟上次会话服务重启后留下的残留 in_progress 任务（无任何 run 跟踪、无完成评论）
+  let db = openDb(dbPath);
+  createProject(db, { name: '残留项目' });
+  const stale = createTask(db, { projectId: 1, title: '残留任务' });
+  updateTask(db, stale.id, { version: stale.version, status: 'in_progress' });
+  db.close();
+
+  const procs = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    const p = new EventEmitter();
+    p.pid = 60000 + procs.length;
+    p.stdout = new EventEmitter();
+    p.stderr = new EventEmitter();
+    p.kill = () => { p.emit('exit', 143); };
+    procs.push({ proc: p, cmd, args, opts });
+    return p;
+  };
+  const app = createApp({ dbPath, spawnFn: fakeSpawn });
+  const srv = app.server;
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  const rq = async (method, path, body) => {
+    const res = await fetch(b + path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  try {
+    // 启动即回收：预置的残留任务回到「待规划」并写说明评论
+    const recovered = await rq('GET', `/api/tasks/${stale.id}`);
+    assert.equal(recovered.data.status, 'backlog');
+    assert.ok(recovered.data.comments.some((c) => c.body.includes('执行进程已中断')));
+
+    // 主目录隔离到临时目录（执行需要可写工作目录）
+    const tmpMain = mkdtempSync(join(tmpdir(), 'tb-stale-main-'));
+    await rq('PATCH', '/api/projects/1', { main_dir: tmpMain });
+
+    // 正在跑的任务不受回收影响；新的残留（手动 PATCH，模拟外部认领后 agent 失联）显式回收
+    const running = await rq('POST', '/api/tasks', { project_id: 1, title: '正在跑' });
+    const rid = running.data.id;
+    await rq('POST', `/api/tasks/${rid}/execute`, { agent: 'kimi' });
+    const orphan = await rq('POST', '/api/tasks', { project_id: 1, title: '失联任务' });
+    const oid = orphan.data.id;
+    const oNow = await rq('GET', `/api/tasks/${oid}`);
+    await rq('PATCH', `/api/tasks/${oid}`, { version: oNow.data.version, status: 'in_progress' });
+
+    assert.equal(app.runner.recoverStale(), 1); // 只回收失联任务
+    const runDetail = await rq('GET', `/api/tasks/${rid}`);
+    assert.equal(runDetail.data.status, 'in_progress'); // 正在跑的保留
+    const orphDetail = await rq('GET', `/api/tasks/${oid}`);
+    assert.equal(orphDetail.data.status, 'backlog'); // 失联的回收
+    assert.ok(orphDetail.data.comments.some((c) => c.body.includes('执行进程已中断')));
+
+    procs[0].proc.emit('exit', 0); // 收尾：跑完假进程，finish 正常清理
+    rmSync(tmpMain, { recursive: true, force: true });
+  } finally {
+    srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 

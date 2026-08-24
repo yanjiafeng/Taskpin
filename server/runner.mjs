@@ -1,12 +1,12 @@
-// Agent 执行器：以子进程拉起 codex / kimi / reasonix 完成指定任务。
+// Agent 执行器：以子进程拉起 codex / kimi / reasonix / dsh（DeepSeek Harness）完成指定任务。
 // 运行状态在内存中（服务重启即丢失跟踪，子进程随服务退出）。
 // 打回重做/续跑时会用任务保存的 thread_id 恢复原 CLI 会话。
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getTask, updateTask, claimTask, addComment, setTaskThread, setTaskLastRun, setTaskUsage, defaultDbPath, resolveMainDir, getSettings, AGENT_NAMES, DbError } from './db.mjs';
+import { getTask, updateTask, claimTask, addComment, setTaskThread, setTaskLastRun, setTaskUsage, setTaskExecOpts, listTasks, defaultDbPath, resolveMainDir, getSettings, AGENT_NAMES, DbError } from './db.mjs';
 
 export { AGENT_NAMES };
 
@@ -19,13 +19,80 @@ export const EFFORTS = ['low', 'medium', 'high']; // 思考强度（codex / reas
 export const CODEX_SANDBOXES = ['read-only', 'workspace-write', 'danger-full-access'];
 // reasonix 的权限模式（run --permission-mode）；看板的 codex 沙箱名会映射过去
 export const REASONIX_MODES = ['manual', 'ask', 'auto', 'acceptEdits', 'dontAsk', 'plan', 'bypassPermissions'];
-const REASONIX_MODE_MAP = { 'read-only': 'plan', 'workspace-write': 'auto', 'danger-full-access': 'bypassPermissions' };
+const REASONIX_MODE_MAP = { 'read-only': 'plan', 'workspace-write': 'auto', 'danger-full-access': 'bypassPermissions', yolo: 'bypassPermissions' };
+
+// 各 agent 在执行弹框里可选的思考/权限档位（GET /api/agent-options 下发给前端）。
+// yolo = 全自动跳过审批（codex：--dangerously-bypass-approvals-and-sandbox；reasonix：bypassPermissions；
+// kimi 不支持：-p 与 -y/--auto 互斥，0.36.0 实测）。
+// 模型清单是动态的，由 getAgentOptions() 读各家 CLI 本地配置补齐，这里只列档位。
+export const AGENT_OPTIONS = {
+  codex: { efforts: EFFORTS, permissions: [...CODEX_SANDBOXES, 'yolo'] },
+  // kimi 的 -p 不能与 --auto/-y 组合，思考/权限不生效
+  kimi: { efforts: [], permissions: [] },
+  reasonix: { efforts: EFFORTS, permissions: [...REASONIX_MODES, 'yolo'] },
+  // dsh（DeepSeek Harness）：headless 无 model/effort 参数（模型在 dsh 设置里配）；
+  // 权限名与 codex 沙箱同名，经 DSH_PERMISSION_MODE 环境变量按次下发（yolo → danger-full-access）
+  dsh: { efforts: [], permissions: [...CODEX_SANDBOXES, 'yolo'] },
+};
+
+// 从各家 CLI 的本地配置文件读可选模型清单（只读模型名/显示名，不碰凭证；文件不存在/解析失败则空数组）。
+// codex：~/.codex/config.toml 的 model（CLI 无枚举能力，只能给到当前配置值）
+// kimi：~/.kimi-code/config.toml 的 [models."<别名>"] 表（-m 接受模型别名）+ default_model
+// reasonix：~/.reasonix/config.toml 的 [[providers]]（--model 接受 provider 名，label 带实际模型名）+ default_model
+export function getAgentOptions() {
+  const read = (p) => { try { return readFileSync(p, 'utf8'); } catch { return null; } };
+  const opt = (agent, models, defaultModel) => ({ ...AGENT_OPTIONS[agent], models, defaultModel });
+
+  let codexModels = [];
+  let codexDefault = null;
+  const codexToml = read(join(homedir(), '.codex', 'config.toml'));
+  if (codexToml) {
+    codexDefault = /^model\s*=\s*"([^"]+)"/m.exec(codexToml)?.[1] ?? null;
+    if (codexDefault) codexModels = [{ id: codexDefault, label: `${codexDefault}（当前配置）` }];
+  }
+
+  const kimiModels = [];
+  let kimiDefault = null;
+  const kimiToml = read(join(homedir(), '.kimi-code', 'config.toml'));
+  if (kimiToml) {
+    kimiDefault = /^default_model\s*=\s*"([^"]+)"/m.exec(kimiToml)?.[1] ?? null;
+    const re = /\[models\."([^"]+)"\]\n([\s\S]*?)(?=\n\[|$)/g;
+    let m;
+    while ((m = re.exec(kimiToml))) {
+      const name = /display_name\s*=\s*"([^"]+)"/.exec(m[2])?.[1];
+      kimiModels.push({ id: m[1], label: name ? `${name}（${m[1]}）` : m[1] });
+    }
+  }
+
+  const reasonixModels = [];
+  let reasonixDefault = null;
+  const reasonixToml = read(join(homedir(), '.reasonix', 'config.toml'));
+  if (reasonixToml) {
+    reasonixDefault = /^default_model\s*=\s*"([^"]+)"/m.exec(reasonixToml)?.[1] ?? null;
+    const re = /\[\[providers\]\]\n([\s\S]*?)(?=\n\[|$)/g;
+    let m;
+    while ((m = re.exec(reasonixToml))) {
+      const name = /^name\s*=\s*"([^"]+)"/m.exec(m[1])?.[1];
+      const model = /^model\s*=\s*"([^"]+)"/m.exec(m[1])?.[1];
+      if (name) reasonixModels.push({ id: name, label: model ? `${name}（${model}）` : name });
+    }
+  }
+
+  return {
+    codex: opt('codex', codexModels, codexDefault),
+    kimi: opt('kimi', kimiModels, kimiDefault),
+    reasonix: opt('reasonix', reasonixModels, reasonixDefault),
+    // dsh 的模型在 Web 设置页 / Cordis patch 层配置，没有可读的本地模型清单文件
+    dsh: opt('dsh', [], null),
+  };
+}
 
 // 从 CLI 输出中识别会话 id（输出滚动截断，必须边收边解析）
 const SESSION_PATTERNS = {
   codex: /session id: ([0-9a-f-]{36})/,
   kimi: /kimi -r (session_[0-9a-f-]+)/,
-  reasonix: /"session_id":"([^"]+)"/, // run --output-format json 的结果行
+  reasonix: /"session_id":"([^"]+)"/, // stream-json 事件流末尾的 {"type":"result"} 结果行
+  // dsh headless 只在结束时打印最终 assistant 文本，无会话 id 可解析 → 不支持续跑
 };
 
 // 从 CLI 输出解析上下文/token 用量（详情抽屉「上下文大小」的数据源）。
@@ -75,10 +142,15 @@ function findReasonixSessionFile(sessionId) {
 function buildCommand(agent, prompt, cwd, dbDir, { model, effort, permission, resumeId } = {}) {
   if (agent === 'codex') {
     const args = ['exec'];
+    const yolo = permission === 'yolo'; // YOLO：跳过所有审批且无沙箱（--dangerously-bypass-approvals-and-sandbox）
     if (resumeId) {
       // resume 子命令没有 -s/--add-dir：沙箱用 -c 覆盖，工作区可写根沿用原会话
       args.push('resume', '--skip-git-repo-check');
-      if (CODEX_SANDBOXES.includes(permission)) args.push('-c', `sandbox_mode=${permission}`);
+      if (yolo) args.push('--dangerously-bypass-approvals-and-sandbox');
+      else if (CODEX_SANDBOXES.includes(permission)) args.push('-c', `sandbox_mode=${permission}`);
+    } else if (yolo) {
+      // YOLO 与 -s/--add-dir 互斥（无沙箱即全机可写，无需放行看板库目录）
+      args.push('--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', '-C', cwd);
     } else {
       // workspace-write 沙箱 + 额外放行看板数据库目录（taskctl 要直写 SQLite）
       const sandbox = CODEX_SANDBOXES.includes(permission) ? permission : 'workspace-write';
@@ -91,7 +163,8 @@ function buildCommand(agent, prompt, cwd, dbDir, { model, effort, permission, re
     return { cmd: 'codex', args, cwd };
   }
   if (agent === 'kimi') {
-    // 注意：此版本 kimi 的 -p 不能与 --auto/-y 组合（permission 仅 codex 生效）
+    // 注意：kimi 的 -p 不能与 --auto/-y 组合（0.36.0 实测报错 Cannot combine --prompt with --yolo）；
+    // kimi 的自动审批由 ~/.kimi-code/config.toml 的 default_permission_mode 控制，看板侧无法按次指定
     const args = [];
     if (resumeId) args.push('-S', resumeId);
     if (model) args.push('-m', model);
@@ -99,16 +172,30 @@ function buildCommand(agent, prompt, cwd, dbDir, { model, effort, permission, re
     return { cmd: 'kimi', args, cwd };
   }
   if (agent === 'reasonix') {
-    // reasonix run 是非交互模式；--resume 要会话文件完整路径（finish 时按 session_id 定位存库）
+    // reasonix run 是非交互模式；--resume 要会话文件完整路径（finish 时按 session_id 定位存库）。
+    // stream-json：过程中持续输出 message/tool_dispatch/tool_result 等事件行（执行过程可见，
+    // json 模式只在结束时输出一行结果）；末尾同样带 {"type":"result"} 结果行，usage/成功判定逻辑不变
     const perm = REASONIX_MODES.includes(permission) ? permission : REASONIX_MODE_MAP[permission] || 'auto';
-    const args = ['run', '--dir', cwd, '--permission-mode', perm, '--add-dir', dbDir, '--output-format', 'json'];
+    const args = ['run', '--dir', cwd, '--permission-mode', perm, '--add-dir', dbDir, '--output-format', 'stream-json'];
     if (resumeId) args.push('--resume', resumeId);
     if (model) args.push('--model', model);
     if (EFFORTS.includes(effort)) args.push('--effort', effort);
     args.push(prompt);
     return { cmd: 'reasonix', args, cwd };
   }
-  throw new DbError('VALIDATION', `unknown agent: ${agent} (codex|kimi|reasonix)`);
+  if (agent === 'dsh') {
+    // DeepSeek Harness（dsh）：headless 一次性执行——新建会话、跑完、最终文本打 stdout，
+    // completed 退出码 0 否则 1（契约与看板 finish 的退出码语义一致）。无 model/effort/resume
+    // 参数（模型在 dsh 设置里配；会话 id 不输出 → 无法续跑，再执行自动新会话、靠评论继承记忆）。
+    // 权限经 DSH_PERMISSION_MODE 下发（取值与 codex 沙箱同名；yolo → danger-full-access），
+    // 默认 workspace-write：bash/写文件限工作区+临时目录，看板回写走 dsh-taskpin 插件工具（HTTP）。
+    // headless 自身过程零输出：过程进度（发言/工具调用/结果）由 dsh-taskpin 插件订阅
+    // session/event 实时写 stderr，与本捕获合并后在输出弹框可见。
+    const perm = permission === 'yolo' ? 'danger-full-access'
+      : CODEX_SANDBOXES.includes(permission) ? permission : 'workspace-write';
+    return { cmd: 'dsh', args: ['--profile', 'headless', prompt], cwd, env: { DSH_PERMISSION_MODE: perm } };
+  }
+  throw new DbError('VALIDATION', `unknown agent: ${agent} (${AGENT_NAMES.join('|')})`);
 }
 
 // 执行 prompt 模板（内置默认）。占位符：{{task_id}} {{tctl}} {{project_name}} {{scope}} {{claim_step}}
@@ -187,7 +274,7 @@ function renderTemplate(tpl, vars) {
   return tpl.replace(/\{\{(\w+)\}\}/g, (m, k) => (k in vars ? vars[k] : m));
 }
 
-function buildPrompt(task, projectPaths, { resume, mode, templates } = {}) {
+function buildPrompt(task, projectPaths, { resume, mode, templates, agent } = {}) {
   const tctl = `node ${TASKCTL}`;
   const kind = mode === 'qa' ? 'qa' : resume ? 'resume' : 'new';
   const tpl = templates?.[kind]?.trim() ? templates[kind] : PROMPT_DEFAULTS[kind];
@@ -196,13 +283,18 @@ function buildPrompt(task, projectPaths, { resume, mode, templates } = {}) {
   const scope = projectPaths.length
     ? projectPaths.map((p) => `  - ${p}`).join('\n')
     : '  （未配置，先自行定位代码仓库）';
-  return renderTemplate(tpl, {
+  const prompt = renderTemplate(tpl, {
     task_id: String(task.id),
     tctl,
     project_name: task.project_name ?? '',
     scope,
     claim_step: claimStep,
   });
+  // dsh 沙箱内 taskctl 直写看板数据库会被权限拦截；dsh-taskpin 插件工具走 HTTP 不受限
+  if (agent === 'dsh') {
+    return `${prompt}\n\n环境提示：你运行在 DeepSeek Harness 中，已内置 taskboard_show / taskboard_comment / taskboard_transition 三个原生工具——回写看板（读任务/发评论/流转状态）优先用工具而不是 taskctl CLI。`;
+  }
+  return prompt;
 }
 
 export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
@@ -226,7 +318,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
 
   function start(taskId, agent, options = {}) {
     if (!AGENT_NAMES.includes(agent)) {
-      throw new DbError('VALIDATION', `unknown agent: ${agent} (codex|kimi|reasonix)`);
+      throw new DbError('VALIDATION', `unknown agent: ${agent} (${AGENT_NAMES.join('|')})`);
     }
     // execMode：execute=实现任务（执行即进进行中）；qa=问答（只讨论不实现，不自动流转状态）
     const execMode = options.mode ?? 'execute';
@@ -269,23 +361,49 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     const resumeId = threadAgent === agent && threadRest.length
       ? threadRest.join(':')
       : null;
-    const project = db.prepare('SELECT name, paths, main_dir FROM projects WHERE id = ?').get(task.project_id);
-    const projectPaths = JSON.parse(project?.paths || '[]');
-    const cwd = resolveMainDir(project); // 主目录作为工作目录；paths 仅作查找范围提示
-    const dbDir = dirname(dbPath ?? defaultDbPath());
-    const prompt = buildPrompt({ ...task, project_name: project?.name }, projectPaths, {
-      resume: Boolean(resumeId),
-      mode: execMode,
-      templates: { new: settings.prompt_new, resume: settings.prompt_resume, qa: settings.prompt_qa }, // 设置页的覆盖模板
-    });
-    const { cmd, args } = buildCommand(agent, prompt, cwd, dbDir, { ...options, resumeId });
+    // 上面的认领/流转已把任务置「进行中」：此处再构造命令/建主目录/spawn，若同步失败
+    // （如主目录创建被拒、命令构造异常），回滚认领——否则会留下「进行中」但无活跃 run 的
+    // 残留任务（卡片无执行中样式却停在进行中列）
+    let proc;
+    try {
+      const project = db.prepare('SELECT name, paths, main_dir FROM projects WHERE id = ?').get(task.project_id);
+      const projectPaths = JSON.parse(project?.paths || '[]');
+      const cwd = resolveMainDir(project); // 主目录作为工作目录；paths 仅作查找范围提示
+      const dbDir = dirname(dbPath ?? defaultDbPath());
+      const prompt = buildPrompt({ ...task, project_name: project?.name }, projectPaths, {
+        resume: Boolean(resumeId),
+        mode: execMode,
+        agent,
+        templates: { new: settings.prompt_new, resume: settings.prompt_resume, qa: settings.prompt_qa }, // 设置页的覆盖模板
+      });
+      const { cmd, args, env } = buildCommand(agent, prompt, cwd, dbDir, { ...options, resumeId });
 
-    const proc = spawnFn(cmd, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      proc = spawnFn(cmd, args, { cwd, env: env ? { ...process.env, ...env } : process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      try {
+        const cur = getTask(db, taskId);
+        if (cur.status === 'in_progress') {
+          updateTask(db, taskId, { version: cur.version, status: 'backlog' });
+          addComment(db, taskId, { author: 'user', body: `执行启动失败，任务回到「待规划」（可重新执行）：${err.message}` });
+        }
+      } catch { /* 任务可能已被删除 */ }
+      throw err;
+    }
     const mode = [execMode === 'qa' ? '问答' : null, options.model, options.effort, options.permission, resumeId ? '续跑' : null].filter(Boolean).join(' · ');
     const run = { task_id: taskId, agent, mode, pid: proc.pid, started_at: new Date().toISOString(), proc, output: '', sessionId: null, stopping: false };
     runs.set(taskId, run);
     // 新执行开始：清除上一次的异常退出标记
     try { setTaskLastRun(db, taskId, null); } catch { /* 任务可能已被删除 */ }
+    // 记录本次选用的模型/思考/权限（按任务记忆：执行弹框回填 + 卡片展示「上一次」）
+    try {
+      setTaskExecOpts(db, taskId, JSON.stringify({
+        agent,
+        ...(options.model ? { model: options.model } : {}),
+        ...(EFFORTS.includes(options.effort) ? { effort: options.effort } : {}),
+        ...(options.permission ? { permission: options.permission } : {}),
+        at: new Date().toISOString(),
+      }));
+    } catch { /* 任务可能已被删除 */ }
     const onData = (d) => {
       run.output = (run.output + d).slice(-OUTPUT_CAP);
       if (!run.sessionId) {
@@ -376,5 +494,24 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     return true;
   }
 
-  return { list, start, stop, output };
+  // 回收「残留进行中」：运行跟踪在内存，服务重启即全部丢失——上次会话已流转到「进行中」
+  // 的任务若没有活跃 run（进程随重启中断/失联、外部认领后 agent 失联、手动拖入等），会永久
+  // 滞留「进行中」列且没有任何执行中样式（无吊牌/缝线/停止入口）。与 finish 的兜底一致：
+  // 放回待规划并写一条说明评论；当前正在跑的任务不打扰。返回本次回收的任务数。
+  function recoverStale() {
+    const runningIds = new Set(runs.keys());
+    const stale = listTasks(db).filter((t) => t.status === 'in_progress' && !runningIds.has(t.id));
+    for (const t of stale) {
+      try {
+        updateTask(db, t.id, { version: t.version, status: 'backlog' });
+        addComment(db, t.id, { author: 'user', body: '执行进程已中断（服务重启或进程失联），任务从「进行中」回到「待规划」，可重新执行' });
+      } catch (err) {
+        console.error(`[runner] 回收残留任务 #${t.id} 失败: ${err.message}`);
+      }
+    }
+    if (stale.length) broadcast();
+    return stale.length;
+  }
+
+  return { list, start, stop, output, recoverStale };
 }

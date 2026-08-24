@@ -1,0 +1,4 @@
+# 安装进 dsh profile 时自动叠加的配置层：把 dsh-taskpin 插件挂载进插件树
+- insert:
+    - id: dsh-taskpin
+      name: dsh-taskpin

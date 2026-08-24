@@ -46,6 +46,7 @@
       <label class="toggle-canceled"><input type="checkbox" data-agent-toggle="codex"> Codex</label>
       <label class="toggle-canceled"><input type="checkbox" data-agent-toggle="kimi"> Kimi</label>
       <label class="toggle-canceled"><input type="checkbox" data-agent-toggle="reasonix"> Reasonix</label>
+      <label class="toggle-canceled"><input type="checkbox" data-agent-toggle="dsh"> DSH</label>
       <div class="settings-hint">停用后执行面板不再显示对应按钮；至少启用一个</div>
     </section>
     <section class="settings-block">
@@ -135,26 +136,20 @@
         <button type="button" data-rmode="qa">💬 问答</button>
       </div>
       <div id="run-hint" class="run-hint hidden"></div>
-      <label class="run-opt">模型<input id="run-model" maxlength="100" placeholder="默认（读 CLI 配置）"></label>
-      <label class="run-opt">思考（Kimi 不生效）
-        <select id="run-effort">
-          <option value="" selected>默认</option>
-          <option value="low">低</option>
-          <option value="medium">中</option>
-          <option value="high">高</option>
-        </select>
+      <div class="run-agents" id="run-agents">
+        <button type="button" class="run-agent" data-agent="codex">Codex</button>
+        <button type="button" class="run-agent" data-agent="kimi">Kimi</button>
+        <button type="button" class="run-agent" data-agent="reasonix">Reasonix</button>
+        <button type="button" class="run-agent" data-agent="dsh">DSH</button>
+      </div>
+      <label class="run-opt" id="run-model-row">模型<select id="run-model"></select></label>
+      <label class="run-opt" id="run-effort-row">思考
+        <select id="run-effort"></select>
       </label>
-      <label class="run-opt">权限（Codex / Reasonix 生效）
-        <select id="run-permission">
-          <option value="" selected>默认（工作区可写）</option>
-          <option value="read-only">只读</option>
-          <option value="workspace-write">工作区可写</option>
-          <option value="danger-full-access">完全开放</option>
-        </select>
+      <label class="run-opt" id="run-permission-row">权限
+        <select id="run-permission"></select>
       </label>
-      <button class="btn primary run-agent" data-agent="codex">▶ Codex 执行</button>
-      <button class="btn primary run-agent" data-agent="kimi">▶ Kimi 执行</button>
-      <button class="btn primary run-agent" data-agent="reasonix">▶ Reasonix 执行</button>
+      <button class="btn primary" id="run-go">▶ 开始执行</button>
       <button class="btn ghost" id="run-cancel">取消</button>
     </div>
   </div>

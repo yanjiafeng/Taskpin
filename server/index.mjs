@@ -65,6 +65,14 @@ export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota } = {})
 
   const resolvedDbPath = dbPath ?? defaultDbPath();
   const runner = createRunner({ db, broadcast, dbPath: resolvedDbPath, spawnFn });
+  // 回收「残留进行中」：运行跟踪在内存，服务重启即丢失——停在「进行中」但没有活跃 run 的
+  // 任务（上次会话进程随重启中断、外部认领后 agent 失联等）自动放回「待规划」，否则会以无
+  // 执行样式的普通卡片永久滞留「进行中」列。启动时先收一次，之后每 30s 周期兜底
+  // （无残留时零写入；正在跑的任务由 recoverStale 内部排除，不打扰）。
+  const recoverStale = () => { try { runner.recoverStale(); } catch { /* 单次回收失败不影响服务 */ } };
+  recoverStale();
+  const staleTimer = setInterval(recoverStale, 30_000);
+  staleTimer.unref();
   const tunnel = createTunnel({ db, broadcast, port, spawnFn });
   const handleApi = createApiHandler({
     db, broadcast, runner, tunnel,
@@ -136,6 +144,9 @@ export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota } = {})
       res.end('not found');
     }
   });
+
+  // 服务关闭时停掉回收定时器（测试里每个 app 都会 close，避免遗留定时器空转）
+  server.on('close', () => clearInterval(staleTimer));
 
   return { server, db, broadcast, runner, tunnel, dbPath: resolvedDbPath };
 }

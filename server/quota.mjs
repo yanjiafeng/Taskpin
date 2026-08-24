@@ -1,7 +1,7 @@
 // 额度查询：DeepSeek（Reasonix）钱包余额 / Kimi 订阅用量 / Codex（OpenAI 兼容）计费。
 // 全部是元数据/钱包接口，不消耗模型 token。凭证只在本机读取，结果不含任何密钥。
 // 结果缓存（默认 60s），前端展开额度区时调用。
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,14 +48,53 @@ async function qDeepseek({ home, fetchImpl }) {
   return { ok: true, balance: b.total_balance, currency: b.currency };
 }
 
+// Kimi Code OAuth 自动刷新：access_token 有效期只有 900s（15 分钟），过期时用
+// refresh_token 走官方端点换新（与 kimi CLI 同一套，client_id 是 Kimi Code 公共
+// OAuth 客户端），成功后回写凭证文件（refresh_token 会轮换，必须回写）；
+// 刷新失败才报「已过期」。
+const KIMI_OAUTH_URL = 'https://auth.kimi.com/api/oauth/token';
+const KIMI_CLIENT_ID = '17e5f671-d194-4dfb-9706-5516cb48c098';
+
+async function refreshKimiToken(credFile, cred, fetchImpl) {
+  const res = await fetchImpl(KIMI_OAUTH_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+    body: new URLSearchParams({
+      client_id: KIMI_CLIENT_ID,
+      grant_type: 'refresh_token',
+      refresh_token: cred.refresh_token,
+    }).toString(),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) return null;
+  const j = await res.json().catch(() => null);
+  if (!j?.access_token) return null;
+  const next = {
+    ...cred,
+    access_token: j.access_token,
+    // 响应没带新 refresh_token 时保留旧的；带了必须换掉（旧的可能随即作废）
+    refresh_token: typeof j.refresh_token === 'string' && j.refresh_token ? j.refresh_token : cred.refresh_token,
+    expires_in: j.expires_in ?? cred.expires_in,
+    expires_at: Math.floor(Date.now() / 1000) + Number(j.expires_in ?? 900),
+  };
+  let writeError = null;
+  try { writeFileSync(credFile, JSON.stringify(next)); } catch (err) { writeError = err.message; }
+  return { cred: next, writeError };
+}
+
 async function qKimi({ home, fetchImpl }) {
   const credFile = join(home, '.kimi-code', 'credentials', 'kimi-code.json');
   if (!existsSync(credFile)) return { ok: false, error: '未找到 kimi 登录凭证（~/.kimi-code）' };
   let cred;
   try { cred = JSON.parse(readFileSync(credFile, 'utf8')); } catch { return { ok: false, error: 'kimi 凭证文件损坏' }; }
   if (!cred.access_token) return { ok: false, error: 'kimi 凭证缺少 access_token' };
+  let note = null;
   if (cred.expires_at && cred.expires_at * 1000 <= Date.now()) {
-    return { ok: false, error: 'kimi 凭证已过期，请在本机运行一次 kimi 刷新' };
+    if (!cred.refresh_token) return { ok: false, error: 'kimi 凭证已过期，请在本机运行一次 kimi 刷新' };
+    const r = await refreshKimiToken(credFile, cred, fetchImpl);
+    if (!r) return { ok: false, error: 'kimi 凭证已过期且自动刷新失败，请在本机运行一次 kimi 重新登录' };
+    cred = r.cred;
+    if (r.writeError) note = `已自动刷新，但新凭证回写失败（${r.writeError}），下次可能需再次刷新`;
   }
   const res = await fetchImpl('https://api.kimi.com/coding/v1/usages', {
     headers: { authorization: `Bearer ${cred.access_token}` },
@@ -79,6 +118,7 @@ async function qKimi({ home, fetchImpl }) {
     } : null,
     // boosterWallet 金额单位是纳元（1e9 = ¥1）
     extra_balance: wallet?.amountLeft != null ? Math.round(Number(wallet.amountLeft) / 1e7) / 100 : null,
+    ...(note ? { note } : {}),
   };
 }
 
