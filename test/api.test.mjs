@@ -353,7 +353,8 @@ test('execute：启动、查重、停止、退出写评论', async () => {
 
     // 停止运行中的 agent：任务回到「待规划」
     await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'kimi' });
-    assert.equal(procs[1].cmd, 'kimi');
+    // Windows 下 runner 会用 ~/.kimi-code/bin/kimi.exe 兜底
+    assert.ok(procs[1].cmd === 'kimi' || /[\\/]kimi\.exe$/.test(procs[1].cmd), `unexpected kimi cmd: ${procs[1].cmd}`);
     const stop = await rq('DELETE', `/api/tasks/${tid}/run`);
     assert.equal(stop.status, 200);
     assert.ok(procs[1].proc.killed);
@@ -669,7 +670,8 @@ test('tunnel：启动、域名持久化、重生成、停止', async () => {
 
     // 启动 → starting；cloudflared 输出域名 → running 并持久化
     await rq('POST', '/api/tunnel/start');
-    assert.equal(procs[0].cmd, 'cloudflared');
+    // Windows 下若 ~/.local/bin/cloudflared.exe 存在会解析成绝对路径
+    assert.ok(procs[0].cmd === 'cloudflared' || /[\\/]cloudflared\.exe$/.test(procs[0].cmd), `unexpected cloudflared cmd: ${procs[0].cmd}`);
     assert.ok(procs[0].args.includes('tunnel'));
     assert.equal((await rq('GET', '/api/tunnel')).data.state, 'starting');
     procs[0].proc.stderr.emit('data', Buffer.from('INF | https://aaa-bbb-ccc.trycloudflare.com |\n'));
@@ -879,4 +881,69 @@ test('quota 端点：返回三家额度结构', async () => {
   } finally {
     srv.close();
   }
+});
+
+test('TTS 后备端点：能力探测、参数校验、Windows 上真实合成 wav', async () => {
+  const cap = await req('GET', '/api/tts');
+  assert.equal(cap.status, 200);
+  assert.equal(typeof cap.data.available, 'boolean');
+
+  const empty = await req('POST', '/api/tts', { text: '   ' });
+  assert.equal(empty.status, 400);
+  assert.equal(empty.data.error.code, 'VALIDATION');
+  const tooLong = await req('POST', '/api/tts', { text: '长'.repeat(501) });
+  assert.equal(tooLong.status, 400);
+
+  if (process.platform !== 'win32') {
+    assert.equal(cap.data.available, false); // 非 Windows 服务端不可用，前端走提示
+    return;
+  }
+  assert.equal(cap.data.available, true);
+  const res = await fetch(`${base}/api/tts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '测试' }),
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /audio\/wav/);
+  const buf = Buffer.from(await res.arrayBuffer());
+  assert.equal(buf.subarray(0, 4).toString('ascii'), 'RIFF'); // 合法 wav 头
+  // 命中缓存的第二次请求应明显更快且内容一致
+  const t0 = Date.now();
+  const res2 = await fetch(`${base}/api/tts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '测试' }),
+  });
+  const buf2 = Buffer.from(await res2.arrayBuffer());
+  assert.ok(Date.now() - t0 < 3000);
+  assert.deepEqual(buf2, buf);
+});
+
+test('评论顺序：问答多轮交错，详情接口严格按提交先后返回（agent 读评论的顺序保证）', async () => {
+  const { data: projects } = await req('GET', '/api/projects');
+  const created = await req('POST', '/api/tasks', { project_id: projects[0].id, title: '顺序任务' });
+  assert.equal(created.status, 201);
+  const id = created.data.id;
+
+  // 模拟问答环节：user 补充 → agent [提问] → user 答复 → agent 再问 → user 再答 → agent 收尾
+  const rounds = [
+    ['user', '需求补充 1'],
+    ['agent', '[提问] 验收标准是什么？'],
+    ['user', '答复：运行 X 输出 Y'],
+    ['agent', '[提问] 还有一个问题'],
+    ['user', '答复 2'],
+    ['agent', '问答结论摘要'],
+  ];
+  for (const [author, body] of rounds) {
+    const r = await req('POST', `/api/tasks/${id}/comments`, { author, body });
+    assert.equal(r.status, 201);
+  }
+
+  const detail = await req('GET', `/api/tasks/${id}`);
+  assert.equal(detail.status, 200);
+  assert.deepEqual(detail.data.comments.map((c) => [c.author, c.body]), rounds);
+  // id 单调递增：taskctl show / dsh 插件 / 详情接口都靠 ORDER BY id 给 agent 供稿
+  const ids = detail.data.comments.map((c) => c.id);
+  assert.deepEqual(ids, [...ids].sort((a, b) => a - b));
 });

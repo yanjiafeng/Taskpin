@@ -10,6 +10,6 @@
   "scripts": {
     "start": "node server/index.mjs",
     "taskctl": "node cli/taskctl.mjs",
-    "test": "node --test 'test/**/*.test.mjs'"
+    "test": "node --test \"./test/**/*.test.mjs\""
   }
 }

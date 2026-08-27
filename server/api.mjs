@@ -50,7 +50,7 @@ function readBody(req) {
   });
 }
 
-export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir, quota }) {
+export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir, quota, tts }) {
   return async function handleApi(req, res, url) {
     const m = url.pathname.match(/^\/api\/tasks\/(\d+)(\/claim|\/comments|\/execute|\/run|\/run\/output)?$/);
     const pm = url.pathname.match(/^\/api\/projects\/(\d+)$/);
@@ -98,6 +98,24 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
       // 各 agent 可选的模型/思考/权限（执行弹框联动选项；模型清单读各家 CLI 本地配置，后端统一下发）
       if (req.method === 'GET' && url.pathname === '/api/agent-options') {
         return sendJson(res, 200, getAgentOptions());
+      }
+      // 服务端 TTS 后备（浏览器无 speechSynthesis 时，Windows SAPI 离线合成 wav；tts.mjs）
+      if (req.method === 'GET' && url.pathname === '/api/tts') {
+        return sendJson(res, 200, { available: tts.available() });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/tts') {
+        const body = await readBody(req);
+        const text = typeof body.text === 'string' ? body.text.trim() : '';
+        if (!text || text.length > tts.MAX_TEXT) {
+          return sendJson(res, 400, { error: { code: 'VALIDATION', message: `text 必填且不超过 ${tts.MAX_TEXT} 字` } });
+        }
+        const rate = Number(body.rate);
+        const wav = await tts.synthesize(text, Number.isFinite(rate) ? rate : 1);
+        if (!wav) {
+          return sendJson(res, 501, { error: { code: 'TTS_UNAVAILABLE', message: '服务端语音合成不可用（仅 Windows 服务端支持）' } });
+        }
+        res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'immutable, max-age=31536000' });
+        return res.end(wav);
       }
       // projects
       if (req.method === 'GET' && url.pathname === '/api/projects') {

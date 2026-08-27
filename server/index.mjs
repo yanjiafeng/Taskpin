@@ -11,6 +11,7 @@ import { createApiHandler } from './api.mjs';
 import { createRunner } from './runner.mjs';
 import { createTunnel } from './tunnel.mjs';
 import { createQuota } from './quota.mjs';
+import { createTts } from './tts.mjs';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../public', import.meta.url));
 
@@ -58,10 +59,18 @@ export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota } = {})
   ensureDefaultProject(db);
 
   const sseClients = new Set();
-  function broadcast() {
-    const msg = 'data: {"type":"change"}\n\n';
-    for (const res of sseClients) res.write(msg);
+  function sseSend(res, msg) {
+    try { res.write(msg); } catch { sseClients.delete(res); } // 死连接写失败直接摘除
   }
+  function broadcast() {
+    for (const res of sseClients) sseSend(res, 'data: {"type":"change"}\n\n');
+  }
+  // 心跳：不能用 SSE 注释行（EventSource 会丢弃，客户端探测不到），发真正的 ping 事件。
+  // 手机端 SSE 常静默僵死——连接不报错但事件再也收不到；前端看门狗靠 ping 判断活性
+  const heartbeat = setInterval(() => {
+    for (const res of sseClients) sseSend(res, 'data: {"type":"ping"}\n\n');
+  }, 15_000);
+  heartbeat.unref();
 
   const resolvedDbPath = dbPath ?? defaultDbPath();
   const runner = createRunner({ db, broadcast, dbPath: resolvedDbPath, spawnFn });
@@ -78,6 +87,8 @@ export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota } = {})
     db, broadcast, runner, tunnel,
     attachmentsDir: attachmentsDir ?? attachmentsDirOf(resolvedDbPath),
     quota: quota ?? createQuota(),
+    // TTS 合成缓存放数据库目录旁（:memory: 测试库落到系统临时目录）
+    tts: createTts({ cacheDir: resolvedDbPath === ':memory:' ? undefined : join(dirname(resolvedDbPath), 'tts-cache') }),
   });
 
   // 外部写入监听：taskctl CLI 直写 SQLite 不经过本进程，无法触发上面的 broadcast；
@@ -145,8 +156,8 @@ export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota } = {})
     }
   });
 
-  // 服务关闭时停掉回收定时器（测试里每个 app 都会 close，避免遗留定时器空转）
-  server.on('close', () => clearInterval(staleTimer));
+  // 服务关闭时停掉回收/心跳定时器（测试里每个 app 都会 close，避免遗留定时器空转）
+  server.on('close', () => { clearInterval(staleTimer); clearInterval(heartbeat); });
 
   return { server, db, broadcast, runner, tunnel, dbPath: resolvedDbPath };
 }

@@ -89,6 +89,7 @@ const state = {
   promptDefaults: null, // 内置执行 prompt 模板（首次打开设置页时拉取）
   openTaskId: null,
   openTask: null, // 抽屉中任务详情（含 version、comments）
+  historyOpen: false, // 抽屉里「更早评论」折叠条的展开状态（SSE 重渲时保持；换任务时重置）
 };
 
 // ---------- Token 与 API ----------
@@ -322,7 +323,7 @@ function cardHtml(t) {
   // 此处先给个可见标记，避免它伪装成普通卡片）
   const orphan = t.status === 'in_progress' && !run;
   const proj = state.projects.find((p) => p.id === t.project_id);
-  const projBadge = proj ? `<span class="proj-badge">${esc(proj.name)}</span>` : '';
+  const projPill = proj ? `<span class="pill">${esc(proj.name)}</span>` : '';
   // 上次执行异常退出的告警标记（新执行/正常结束由服务端清除）
   let failBadge = '';
   if (t.last_run && !live) {
@@ -351,15 +352,23 @@ function cardHtml(t) {
     : run
       ? `<button class="run-btn" data-stop="${t.id}" title="进程尚未退出（任务已「${STATUS_META[t.status].label}」），点击停止 ${run.agent}"><span class="stop-ic"></span></button>`
       : '';
+  // 布局方案 C（docs/demos/cards2-layouts.html 选定）：标题最大独占头部（3 行 clamp，全文在 title 悬浮），
+  // #序号/项目/优先级/💬评论数/🕐更新时间收成一排胶囊自动换行，底部行放执行摘要·告警·停止
+  const runRow = (execTag || failBadge || runBtn)
+    ? `<div class="c-run">${execTag}${failBadge}${runBtn}</div>` : '';
   return `
     <div class="card${live ? ' running' : ''}${failBadge ? ' run-failed' : ''}" draggable="true" data-id="${t.id}" style="--rot:${cardTilt(t.id)}deg">
       ${live ? '<span class="hang-tag">执行中</span>' : ''}
       ${orphan ? '<span class="orphan-tag" title="任务停在「进行中」但没有活跃执行进程（执行中断/失联），将自动收回「待规划」">⚠ 执行中断</span>' : ''}
-      <div class="title-row">
-        <span class="prio ${esc(t.priority)}" title="优先级：${PRIORITY_LABEL[t.priority] || t.priority}"></span>
-        <span class="title">${esc(t.title)}</span>
+      <div class="c-head"><span class="title" title="${esc(t.title)}">${esc(t.title)}</span></div>
+      <div class="c-pills">
+        <span class="pill">#${t.id}</span>
+        ${projPill}
+        <span class="pill prio-${esc(t.priority)}">● ${esc(PRIORITY_LABEL[t.priority] || t.priority)}</span>
+        ${comments ? `<span class="pill">${comments}</span>` : ''}
+        <span class="pill">🕐 ${esc(fmtLocal(t.updated_at))}</span>
       </div>
-      <div class="meta"><span>#${t.id}</span>${projBadge}${comments ? `<span>${comments}</span>` : ''}${execTag}${failBadge}${runBtn}</div>
+      ${runRow}
     </div>`;
 }
 
@@ -495,6 +504,7 @@ async function moveTask(task, target) {
 // ---------- 详情抽屉 ----------
 async function openDrawer(id) {
   state.openTaskId = id;
+  state.historyOpen = false; // 换任务时历史评论回到默认折叠
   // 立即打开抽屉并显示图钉加载动画，避免点击卡片后「卡一下」的空白等待
   $('#drawer').innerHTML =
     '<div class="drawer-loading"><div class="load-note"></div><div class="load-text">正在打开任务…</div></div>';
@@ -504,12 +514,166 @@ async function openDrawer(id) {
 }
 
 function closeDrawer() {
+  stopSpeak(); // 关抽屉时停止播报
   state.openTaskId = null;
   state.openTask = null;
   pendingImages = []; // 未发送的附图随抽屉关闭丢弃
   $('#drawer').innerHTML = ''; // 同时丢弃残留输入，避免污染下一个打开的任务（见 openDrawer）
   $('#drawer').classList.add('hidden');
   $('#drawer-backdrop').classList.add('hidden');
+}
+
+// ---------- 语音播报（免费、不烧 token；双链路） ----------
+// 主链路：浏览器内置 Web Speech API（离线、手机本机发声）；
+// 后备：浏览器不支持 speechSynthesis 时，服务端 Windows SAPI 离线合成 wav 逐句播放（server/tts.mjs）。
+// 评论 markdown → 可朗读纯文本：围栏代码块不读，表格竖线变停顿，去掉语法符号
+function mdToSpeech(src) {
+  let text = String(src ?? '');
+  text = text.replace(/```[\s\S]*?```/g, ' '); // 围栏代码块不朗读
+  text = text.replace(/`([^`\n]+)`/g, '$1'); // 行内代码去反引号、保留内容
+  text = text.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '$1'); // 链接只读文字
+  text = text.replace(/^To resume this session:.*$/gm, ' '); // [runner] 尾部的续跑提示不读
+  text = text.replace(/^\s*\|[\s:|-]*-[\s:|-]*\|\s*$/gm, ' '); // 表格分隔行
+  text = text.replace(/^\s*\|(.*)\|\s*$/gm, (m, inner) => // 表格行：单元格用顿号连读
+    inner.split('|').map((c) => c.trim()).filter(Boolean).join('，'));
+  text = text.replace(/^#{1,4}\s+/gm, ''); // 标题井号
+  text = text.replace(/^\s*[-*]\s+/gm, ''); // 无序列表标记
+  text = text.replace(/^\s*\d+[.)]\s+/gm, ''); // 有序列表标记
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, '$1'); // 加粗
+  text = text.replace(/\*([^*\n]+)\*/g, '$1'); // 斜体
+  return text;
+}
+
+// 按句切分（中英文句读 + 换行），超长句再按逗号/顿号/冒号拆——
+// 逐句 speak 既让停顿自然，也规避 Chrome 长 utterance 约 15s 被掐断的问题
+function splitSpeech(text) {
+  const out = [];
+  for (const seg of String(text).match(/[^。！？!?；;\n]+[。！？!?；;]?/g) || []) {
+    const s = seg.trim();
+    if (!s) continue;
+    if (s.length <= 120) { out.push(s); continue; }
+    for (const sub of s.match(/[^，,、：:]+[，,、：:]?/g) || []) {
+      const t = sub.trim();
+      if (t) out.push(t);
+    }
+  }
+  return out;
+}
+
+// 挑中文语音：优先自然/神经音源，选定后存 localStorage 保持稳定；列表未就绪时返回 null 用浏览器默认
+function pickZhVoice() {
+  const voices = speechSynthesis.getVoices();
+  if (!voices.length) return null;
+  const saved = localStorage.getItem('taskboard_tts_voice');
+  if (saved) {
+    const v = voices.find((x) => x.voiceURI === saved);
+    if (v) return v;
+  }
+  const zh = voices.filter((v) => /^zh([-_]|$)/i.test(v.lang));
+  const pool = zh.length ? zh : voices;
+  const best = pool.find((v) => /natural|neural|xiaoxiao|siri|tingting|online/i.test(v.name)) || pool[0];
+  if (best) localStorage.setItem('taskboard_tts_voice', best.voiceURI);
+  return best || null;
+}
+
+const tts = { speaking: false, pending: 0, audio: null };
+
+function setTtsBtn(speaking) {
+  const btn = $('#tts-btn');
+  if (btn) {
+    btn.textContent = speaking ? '⏹ 停止' : '🔊 播报';
+    btn.classList.toggle('speaking', speaking);
+  }
+}
+
+function stopSpeak() {
+  tts.speaking = false;
+  tts.pending = 0;
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  if (tts.audio) { tts.audio.pause(); tts.audio = null; } // 服务端后备链路正在播的音频
+  setTtsBtn(false);
+}
+
+// 朗读一组评论里所有 Agent 发言；播报中再次点击 = 中断
+function toggleSpeak(comments) {
+  if (tts.speaking) { stopSpeak(); return; }
+  const text = comments.filter((c) => c.author === 'agent').map((c) => mdToSpeech(c.body)).join('\n');
+  const sentences = splitSpeech(text);
+  if (!sentences.length) { toast('最新一轮没有可朗读的 Agent 回答'); return; }
+  if ('speechSynthesis' in window) speakLocal(sentences);
+  else speakServer(sentences); // 后备：浏览器不支持 speechSynthesis 时走服务端合成
+}
+
+// 主链路：浏览器内置 speechSynthesis（免费、离线、移动端本机发声）
+function speakLocal(sentences) {
+  speechSynthesis.cancel();
+  const voice = pickZhVoice();
+  const rate = Number(localStorage.getItem('taskboard_tts_rate')) || 1;
+  tts.speaking = true;
+  tts.pending = sentences.length;
+  setTtsBtn(true);
+  const done = () => {
+    tts.pending -= 1;
+    if (tts.pending <= 0) {
+      tts.speaking = false;
+      tts.pending = 0;
+      setTtsBtn(false);
+    }
+  };
+  for (const s of sentences) {
+    const u = new SpeechSynthesisUtterance(s);
+    if (voice) u.voice = voice;
+    u.lang = voice?.lang || 'zh-CN';
+    u.rate = rate;
+    u.onend = done;
+    u.onerror = done;
+    speechSynthesis.speak(u);
+  }
+}
+
+// 后备链路：浏览器不支持 speechSynthesis（部分安卓 WebView/小众浏览器）时，
+// 逐句请求服务端（Windows SAPI）离线合成的 wav，用 <audio> 顺序播放
+async function speakServer(sentences) {
+  const rate = Number(localStorage.getItem('taskboard_tts_rate')) || 1;
+  tts.speaking = true;
+  setTtsBtn(true);
+  for (const s of sentences) {
+    if (!tts.speaking) break;
+    try {
+      const res = await fetch(`/api/tts${tokenQS()}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: s, rate }),
+      });
+      if (res.status === 501) {
+        toast('浏览器不支持语音合成，服务端语音合成也不可用（仅 Windows 服务端支持）', 'error');
+        break;
+      }
+      if (!res.ok) { toast(`语音合成失败（${res.status}）`, 'error'); break; }
+      await playBlob(await res.blob());
+    } catch {
+      if (tts.speaking) toast('语音合成请求失败', 'error');
+      break;
+    }
+  }
+  tts.speaking = false;
+  setTtsBtn(false);
+}
+
+function playBlob(blob) {
+  return new Promise((resolve) => {
+    const audio = new Audio(URL.createObjectURL(blob));
+    tts.audio = audio;
+    const done = () => {
+      if (tts.audio === audio) tts.audio = null;
+      URL.revokeObjectURL(audio.src);
+      resolve();
+    };
+    audio.onended = done;
+    audio.onerror = done;
+    audio.onpause = done; // stopSpeak 触发的 pause 也要解除 await，让循环看到 speaking=false 退出
+    audio.play().catch(done);
+  });
 }
 
 // ---------- 图片灯箱（评论附图页面内查看） ----------
@@ -531,6 +695,24 @@ async function refreshDrawer() {
     return;
   }
   renderDrawer();
+}
+
+// 抽屉评论框里还有未发送内容（文本或附图）时，先提交为评论再启动执行/问答——
+// 否则执行启动成功会 closeDrawer，草稿被静悄悄丢掉，agent 也永远读不到它；
+// 先落库再启动也保证了「评论 → 执行」的顺序。返回是否提交了评论。
+async function flushDrawerComment(taskId) {
+  if (state.openTask?.id !== taskId) return false;
+  const el = document.getElementById('d-comment');
+  if (!el) return false;
+  const text = el.value.trim();
+  if (!text && pendingImages.length === 0) return false;
+  await api(`/api/tasks/${taskId}/comments`, {
+    method: 'POST',
+    body: { author: 'user', body: text, images: pendingImages },
+  });
+  pendingImages = [];
+  if (el.value.trim() === text) el.value = '';
+  return true;
 }
 
 // ---------- 评论图片附件（粘贴/选择，最多 6 张，单张 ≤8MB） ----------
@@ -698,7 +880,7 @@ function renderDrawer() {
   if (!t) return;
   // 保留未提交的输入：SSE/轮询触发 renderDrawer 会重建 innerHTML，
   // 不抢救草稿的话，用户正在打的评论/答复/标题/描述会被清空
-  const draftIds = ['d-comment', 'd-reply', 'd-title', 'd-desc', 'd-priority'];
+  const draftIds = ['d-comment', 'd-title', 'd-desc', 'd-priority'];
   const drafts = {};
   for (const id of draftIds) {
     const el = document.getElementById(id);
@@ -717,12 +899,32 @@ function renderDrawer() {
   // 已取消任务的删除入口（替代原卡片上的 × 按钮）
   const delBtn = t.status === 'canceled'
     ? '<button class="btn danger" id="d-del">🗑 删除任务</button>' : '';
-  // 执行/停止入口（与卡片按钮同一套逻辑）：终态不显示；放在评论输入区，发布评论后顺手点
+  // 执行/停止入口（与卡片按钮同一套逻辑）：终态不显示；放在评论输入区，发布评论后顺手点。
+  // 有 exec_opts 记忆（且 agent 仍启用）时用 split button（docs/demos/composer-actions.html 方案 C）：
+  // 主区「▶ 执行 · agent」直接用上次参数拉起，▾ 展开「💬 问答 / ⚙ 更换工具/参数」；
+  // 无记忆则保留原来的「执行 / 问答」（开面板）
   const drawerRun = state.runs.get(t.id);
-  const runCtl = drawerRun
-    ? '<button class="btn danger" id="d-stop">■ 停止执行</button>'
-    : (!['done', 'canceled'].includes(t.status)
-        ? '<button class="btn primary" id="d-exec">▶ 执行 / 问答</button>' : '');
+  let runCtl = '';
+  let runMenu = '';
+  if (drawerRun) {
+    runCtl = '<button class="btn danger" id="d-stop">■ 停止执行</button>';
+  } else if (!['done', 'canceled'].includes(t.status)) {
+    const eo = (() => { try { return t.exec_opts ? JSON.parse(t.exec_opts) : null; } catch { return null; } })();
+    if (eo?.agent && state.settings.agents.includes(eo.agent)) {
+      const eoDesc = [eo.agent, eo.model, eo.effort, eo.permission].filter(Boolean).join(' · ');
+      runCtl = `<span class="split-run">
+          <button class="btn primary" id="d-quick-exec" title="用上次的参数直接执行：${esc(eoDesc)}">▶ 执行 · ${esc(eo.agent)}</button>
+          <button class="btn primary" id="d-run-menu-btn" title="更多：问答 / 更换工具或参数">▾</button>
+        </span>`;
+      runMenu = `<div class="run-menu hidden" id="d-run-menu">`
+        + (QA_STATUSES.includes(t.status)
+          ? `<button type="button" class="run-menu-item" id="d-quick-qa">💬 问答 · ${esc(eo.agent)}<small>只讨论不实现，用上次的参数</small></button>` : '')
+        + `<button type="button" class="run-menu-item" id="d-exec">⚙ 更换工具/参数…<small>打开选择面板，改 agent / 模型 / 思考 / 权限</small></button>`
+        + `</div>`;
+    } else {
+      runCtl = '<button class="btn primary" id="d-exec">▶ 执行 / 问答</button>';
+    }
+  }
 
   const commentHtml = (c) => {
     const isQuestion = c.author === 'agent' && c.body.trimStart().startsWith('[提问]');
@@ -751,19 +953,20 @@ function renderDrawer() {
     && !t.comments.slice(lastQIdx + 1).some((c) => c.author === 'user')
     && !state.runs.get(t.id)
     && !['done', 'canceled'].includes(t.status);
-  // 问答成对：答复框直接跟在 [提问] 评论下方（而非底部输入区），问与答视觉上同一串
-  const replyFormHtml = showReply ? `
-    <form id="reply-form" class="reply-box inline">
-      <label>↩ 答复这个提问（提交后自动续跑会话）</label>
-      <textarea id="d-reply" rows="3" placeholder="输入你的答复…"></textarea>
-      <button type="submit" class="btn primary">提交并继续</button>
-    </form>` : '';
-  const renderRange = (list, offset) => list.map((c, j) => (
-    commentHtml(c) + (offset + j === lastQIdx ? replyFormHtml : '')
-  )).join('');
+  // 答复入口已合并到底部评论框（答复模式，见下方 composer）：存在未答复 [提问] 时，
+  // 唯一输入框提交 = 发评论 + 自动续跑，不再在提问下方渲染第二个输入框
+  const renderRange = (list) => list.map(commentHtml).join('');
+  const ttsBtn = latestRound.some((c) => c.author === 'agent' && c.body.trim())
+    ? ' <button type="button" class="tts-btn" id="tts-btn" title="朗读最新一轮的 Agent 回答（再次点击中断）">🔊 播报</button>'
+    : '';
+  // 历史评论默认折叠：只显示「最新一轮」，更早评论收进折叠条，点击展开按原顺序显示；
+  // 展开状态存 state.historyOpen，SSE/轮询重渲时保持
+  const histHtml = history.length
+    ? `<button type="button" class="hist-toggle" id="hist-toggle">${state.historyOpen ? '▾ 收起更早评论' : `▸ 查看更早评论 · ${history.length} 条`}</button>
+       <div id="hist-list"${state.historyOpen ? '' : ' class="hidden"'}>${renderRange(history)}</div>`
+    : '';
   const commentsHtml = t.comments.length
-    ? `<div class="latest-round"><div class="lr-tag">◆ 最新一轮</div>${renderRange(latestRound, roundStart)}</div>
-       ${history.length ? `<div class="d-sec">更早的评论 · ${history.length}</div>${renderRange(history, 0)}` : ''}`
+    ? `<div class="latest-round"><div class="lr-tag">◆ 最新一轮${ttsBtn}</div>${renderRange(latestRound)}</div>${histHtml}`
     : '<div style="color:var(--text-dim)">暂无评论</div>';
 
   // 上下文大小：优先用最近执行从 agent 输出解析到的会话用量（tasks.usage，codex/reasonix 有，kimi 无）；
@@ -816,15 +1019,17 @@ function renderDrawer() {
       <div class="d-comments-col">
         <div class="d-comments-scroll">${commentsHtml}</div>
         <div class="d-composer">
-          <form id="comment-form">
-            <textarea id="d-comment" rows="4" placeholder="写评论…（验收意见、补充说明；可直接粘贴截图）"></textarea>
+          <form id="comment-form"${showReply ? ' class="reply-mode"' : ''}>
+            ${showReply ? '<label class="reply-hint">↩ 正在答复 Agent 的提问：提交后自动续跑会话（只想记录评论可先忽略，提问会保留）</label>' : ''}
+            <textarea id="d-comment" rows="4" placeholder="${showReply ? '答复 Agent 的提问…（提交后自动续跑会话；可直接粘贴截图）' : '写评论…（验收意见、补充说明；可直接粘贴截图）'}"></textarea>
             <div id="img-strip" class="img-strip hidden"></div>
             <div class="row comment-actions">
               <button type="button" class="btn ghost" id="img-btn" title="添加图片（也可直接粘贴）">📎</button>
               <input type="file" id="img-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
-              <button type="submit" class="btn primary">发表评论</button>
+              <button type="submit" class="btn primary">${showReply ? '答复并继续' : '发表评论'}</button>
               ${runCtl}
             </div>
+            ${runMenu}
           </form>
         </div>
       </div>
@@ -847,6 +1052,14 @@ function renderDrawer() {
   }
 
   $('#drawer .close').onclick = closeDrawer;
+  // 🔊 语音播报：朗读最新一轮 Agent 回答（再次点击中断）
+  $('#tts-btn')?.addEventListener('click', () => toggleSpeak(latestRound));
+  // 历史评论折叠条：展开/收起（状态存 state.historyOpen，重渲时保持）
+  $('#hist-toggle')?.addEventListener('click', () => {
+    state.historyOpen = !state.historyOpen;
+    $('#hist-list').classList.toggle('hidden', !state.historyOpen);
+    $('#hist-toggle').textContent = state.historyOpen ? '▾ 收起更早评论' : `▸ 查看更早评论 · ${history.length} 条`;
+  });
   // 评论附图：页面内灯箱查看（不开新页）
   $('#drawer').querySelectorAll('.comment-img').forEach((img) => {
     img.onclick = () => openLightbox(img.src);
@@ -934,27 +1147,41 @@ function renderDrawer() {
       });
     });
   });
-  // 答复 [提问]：发评论后自动续跑——阻塞中的提问续跑执行，待规划/待办续跑问答
-  $('#reply-form')?.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const btn = e.target.querySelector('button[type=submit]');
+  // 快捷执行/问答：有 exec_opts 记忆时不弹选择面板，直接用上次的 agent + 模型/思考/权限拉起
+  const quickRun = (btn, mode) => {
+    let eo = null;
+    try { eo = JSON.parse(t.exec_opts || 'null'); } catch { /* 坏值忽略 */ }
+    if (!eo?.agent) { openRunSheet(t.id); return; } // 兜底：记忆坏了走选择面板
     withLoading(btn, async () => {
-      const body = $('#d-reply').value.trim();
-      if (!body) return;
+      const body = { agent: eo.agent, mode };
+      if (eo.model) body.model = eo.model;
+      if (eo.effort) body.effort = eo.effort;
+      if (eo.permission) body.permission = eo.permission;
       try {
-        await api(`/api/tasks/${t.id}/comments`, { method: 'POST', body: { author: 'user', body } });
-        const mode = ['backlog', 'todo'].includes(state.openTask.status) ? 'qa' : 'execute';
-        const threadAgent = (state.openTask.thread_id || '').split(':')[0];
-        const agent = state.settings.agents.includes(threadAgent) ? threadAgent : state.settings.agents[0];
-        await api(`/api/tasks/${t.id}/execute`, { method: 'POST', body: { agent, mode } });
-        toast(`已提交答复，${agent} 继续中`);
-        scheduleReload();
+        // 评论框里有未发送的内容先落库（保证 agent 启动即可读到、且不被关抽屉丢掉）
+        const flushed = await flushDrawerComment(t.id);
+        await api(`/api/tasks/${t.id}/execute`, { method: 'POST', body });
+        // 与选择面板发起一致：启动成功后关掉明细页，回到看板看运行卡片
+        if (state.openTask?.id === t.id) closeDrawer();
+        toast(`${flushed ? '已提交评论，' : ''}已启动 ${eo.agent} ${mode === 'qa' ? '问答' : '执行'}任务 #${t.id}`);
       } catch (err) {
         toast(err.message, 'error');
-        scheduleReload();
       }
+      scheduleReload();
     });
+  };
+  $('#d-quick-exec')?.addEventListener('click', (e) => quickRun(e.currentTarget, 'execute'));
+  $('#d-quick-qa')?.addEventListener('click', (e) => quickRun(e.currentTarget, 'qa'));
+  // split button 的 ▾：展开/收起「问答 / 更换」菜单；点菜单项或页面其它处收起
+  $('#d-run-menu-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const menu = $('#d-run-menu');
+    menu.classList.toggle('hidden');
+    if (!menu.classList.contains('hidden')) {
+      setTimeout(() => document.addEventListener('click', () => menu.classList.add('hidden'), { once: true }), 0);
+    }
   });
+  $('#d-run-menu')?.addEventListener('click', () => $('#d-run-menu').classList.add('hidden'));
   // 评论附图：textarea 直接粘贴截图，或点 📎 选择（手机端走相册）
   $('#d-comment').addEventListener('paste', (e) => {
     const files = [...(e.clipboardData?.items || [])]
@@ -977,9 +1204,23 @@ function renderDrawer() {
           body: { author: 'user', body, images: pendingImages },
         });
         pendingImages = [];
+        // 清空已发送的文本：否则 300ms 后的重渲（scheduleReload/SSE）会把它当未发送草稿
+        // 抢救恢复回输入框，看起来像没保存成功，还会被重复提交。
+        // 请求期间用户又打了字（值变了）则不动，保留新输入
+        const cmt = $('#d-comment');
+        if (cmt && cmt.value.trim() === body) cmt.value = '';
+        // 答复模式（有未答复的 [提问]）：评论提交后自动续跑——阻塞中的提问续跑执行，待规划/待办续跑问答
+        if (showReply && body) {
+          const mode = ['backlog', 'todo'].includes(state.openTask.status) ? 'qa' : 'execute';
+          const threadAgent = (state.openTask.thread_id || '').split(':')[0];
+          const agent = state.settings.agents.includes(threadAgent) ? threadAgent : state.settings.agents[0];
+          await api(`/api/tasks/${t.id}/execute`, { method: 'POST', body: { agent, mode } });
+          toast(`已提交答复，${agent} 继续中`);
+        }
         scheduleReload();
       } catch (err) {
         toast(err.message, 'error');
+        scheduleReload();
       }
     });
   };
@@ -1184,14 +1425,16 @@ async function refreshShare() {
   $('#share-status').textContent = `状态：${statusText}`
     + (!s.live && s.url && s.state !== 'starting' ? '（下方是上次使用的域名，已失效）' : '');
   $('#share-url').textContent = s.url || '（尚未生成）';
+  $('#share-lan').textContent = s.lanUrl || '（未获取到局域网地址）';
   $('#share-token').textContent = s.token || '（未设置 TASKBOARD_TOKEN）';
   const active = s.state === 'running' || s.state === 'starting';
   $('#share-start').classList.toggle('hidden', active);
   $('#share-stop').classList.toggle('hidden', !active);
   $('#share-regen').classList.toggle('hidden', s.state !== 'running');
   const copyBtn = $('#share-copy');
-  copyBtn.dataset.link = s.url ? (s.token ? `${s.url}/#token=${encodeURIComponent(s.token)}` : s.url) : '';
-  copyBtn.disabled = !s.url;
+  const linkUrl = s.url || s.lanUrl || null;
+  copyBtn.dataset.link = linkUrl ? (s.token ? `${linkUrl}/#token=${encodeURIComponent(s.token)}` : linkUrl) : '';
+  copyBtn.disabled = !linkUrl;
   clearInterval(shareTimer);
   shareTimer = s.state === 'starting' ? setInterval(refreshShare, 1000) : null;
 }
@@ -1290,12 +1533,32 @@ function applyTheme(theme) {
 }
 
 // ---------- SSE ----------
+// 服务器每 15s 发一次 {"type":"ping"} 心跳。SSE 连接可能静默僵死——不触发 onerror、
+// 事件却再也收不到（手机端/隧道空闲超时尤其常见），因此靠前端的 lastEvent 活性判断 +
+// 看门狗主动重连，而不是干等 onerror。超过 SSE_STALE_MS 无任何事件（含心跳）即视为僵死。
+let sseEs = null;
+let sseLastEventAt = 0;
+const SSE_STALE_MS = 45_000;
+
 function connectEvents() {
+  if (sseEs) { sseEs.close(); sseEs = null; } // 幂等：重复调用先关掉旧连接
   const token = getToken();
   const url = token ? `/api/events?token=${encodeURIComponent(token)}` : '/api/events';
   const es = new EventSource(url);
+  sseEs = es;
   let timer = null;
-  es.onmessage = () => {
+  es.onopen = () => {
+    sseLastEventAt = Date.now();
+    // 重连成功（非首次连接）：断连期间服务器广播的 change 事件不会重放，补一次全量重载。
+    // 手机端锁屏/切后台会挂起 SSE，期间的「执行完成 → 待验收」等变更全靠重连这次补拉
+    if (connectEvents.connected) scheduleReload();
+    connectEvents.connected = true;
+  };
+  es.onmessage = (ev) => {
+    sseLastEventAt = Date.now();
+    let type = 'change';
+    try { type = JSON.parse(ev.data)?.type || 'change'; } catch { /* 解析失败按变更处理 */ }
+    if (type === 'ping') return; // 心跳只刷新活性时间，不触发重载
     // 任务/评论/项目变更：走统一去抖重载（与本地操作后的显式刷新合并，防同一次变更重渲两遍）
     scheduleReload();
     clearTimeout(timer);
@@ -1303,9 +1566,23 @@ function connectEvents() {
   };
   es.onerror = () => {
     es.close();
+    if (sseEs === es) sseEs = null;
     setTimeout(connectEvents, 3000);
   };
 }
+
+// 心跳看门狗：前台状态下每 10s 检查一次，连接僵死立即重连（不等 TCP 超时，可能是分钟级）
+setInterval(() => {
+  if (document.hidden || !sseEs) return;
+  if (Date.now() - sseLastEventAt > SSE_STALE_MS) connectEvents();
+}, 10_000);
+
+// 页面从后台/锁屏回到前台：补拉一次 + 连接可能已僵死，超期立即重连不等 onerror
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  scheduleReload();
+  if (!sseEs || Date.now() - sseLastEventAt > SSE_STALE_MS) connectEvents();
+});
 
 // ---------- 入口 ----------
 function init() {
@@ -1535,11 +1812,13 @@ function init() {
     if (effort) body.effort = effort;
     if (permission) body.permission = permission;
     try {
+      // 从任务明细发起且评论框里有未发送内容：先提交为评论再启动（保证 agent 能读到、草稿不丢）
+      const flushed = await flushDrawerComment(taskId);
       await api(`/api/tasks/${taskId}/execute`, { method: 'POST', body });
       closeRunSheet();
       // 从任务明细发起的执行：启动成功后顺手关掉明细页，回到看板看运行卡片
       if (state.openTask?.id === taskId) closeDrawer();
-      toast(`已启动 ${agent} ${runMode === 'qa' ? '问答' : '执行'}任务 #${taskId}`);
+      toast(`${flushed ? '已提交评论，' : ''}已启动 ${agent} ${runMode === 'qa' ? '问答' : '执行'}任务 #${taskId}`);
     } catch (err) {
       toast(err.message, 'error');
     }

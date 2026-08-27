@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务卡片布局 Demos V2 · 软木板主题</title>
+<style>
+  /* 与正式 style.css 同源的软木板/便利贴主题变量 */
+  :root {
+    --cork: #c89866; --cream: #f7edd8;
+    --note-yellow: #fff3a0; --note-blue: #c3e2ff; --note-pink: #ffd1dc;
+    --note-green: #cdf0c8; --note-block: #e6dcae;
+    --pin: #d93a2b; --pin-hi: #ff6b5b; --pin-dark: #b02a1e;
+    --ink: #4a3f30; --ink2: #7a6a52; --ink3: #9a8a70;
+    --paper-edge: rgba(122, 84, 50, 0.4);
+    --amber: #e8a33d;
+    --hand: "Marker Felt", "Chalkboard SE", "Comic Sans MS", cursive;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+    background-color: var(--cork);
+    background-image:
+      radial-gradient(rgba(122, 84, 50, 0.16) 1.2px, transparent 1.5px),
+      repeating-linear-gradient(0deg, rgba(120, 80, 45, 0.05) 0 2px, transparent 2px 9px);
+    background-size: 26px 26px, auto;
+    color: var(--ink); font-size: 14px; padding: 32px 28px 60px;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: #6b5636; font-size: 13px; margin-bottom: 26px; }
+  .variant { margin-bottom: 44px; }
+  .variant > h2 { font-size: 16px; margin-bottom: 3px; }
+  .variant > p { font-size: 12.5px; color: #6b5636; margin-bottom: 14px; max-width: 760px; line-height: 1.6; }
+  .lane { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+
+  /* ========== 共用：便签基底（图钉/阴影/倾斜） ========== */
+  .note {
+    position: relative; width: 250px; border-radius: 2px;
+    background: var(--note-yellow);
+    box-shadow: 0 1px 1px rgba(60,40,20,.18), 0 9px 9px -6px rgba(60,40,20,.5);
+    transform: rotate(-1.2deg);
+  }
+  .note:nth-child(2n) { transform: rotate(1.1deg); background: var(--note-blue); }
+  .note:nth-child(3n) { transform: rotate(-0.4deg); }
+  .note::before { /* 图钉 */
+    content: ""; position: absolute; top: -7px; left: 50%; margin-left: -7px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, var(--pin-hi), var(--pin) 55%, var(--pin-dark));
+    box-shadow: 0 1px 1px rgba(0,0,0,.35), 1px 4px 4px rgba(60,40,20,.45);
+  }
+  .note.pink { background: var(--note-pink); }
+  .note.green { background: var(--note-green); }
+  .title { font-family: var(--hand); font-size: 15.5px; line-height: 1.35; overflow-wrap: anywhere; }
+  .clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .clamp3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .badge {
+    border: 1px solid rgba(74,63,48,.3); border-radius: 999px; padding: 1px 8px;
+    font-size: 11px; color: var(--ink2); background: rgba(255,255,255,.35);
+    max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none;
+  }
+  .prio-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 1px 1px rgba(60,40,20,.3); }
+  .prio-dot.high { background: var(--pin); }
+  .prio-dot.normal { background: rgba(74,63,48,.35); }
+  .prio-dot.low { background: rgba(74,63,48,.18); }
+  .extag {
+    display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 11px; color: var(--ink2); border: 1px dashed rgba(74,63,48,.35); border-radius: 2px; padding: 1px 5px;
+  }
+  .failtag {
+    display: inline-block; background: var(--pin); color: #fff; font-weight: 600; font-size: 11px;
+    padding: 2px 9px 2px 7px; border-radius: 2px; transform: rotate(-1.2deg);
+    box-shadow: 0 1px 2px rgba(60,40,20,.4);
+    clip-path: polygon(0 0, 100% 0, calc(100% - 6px) 50%, 100% 100%, 0 100%);
+  }
+  .hangtag {
+    position: absolute; top: 3px; left: calc(50% + 11px);
+    background: var(--note-yellow); color: var(--pin-dark);
+    border: 1px solid rgba(74,63,48,.4); border-radius: 2px; padding: 3px 10px;
+    font-size: 13px; font-weight: 700; white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(60,40,20,.3);
+  }
+  .runline { display: inline-flex; align-items: center; gap: 5px; color: var(--pin-dark); font-family: var(--hand); font-size: 14px; }
+  .runline::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--pin); }
+  .stopbtn {
+    width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--pin-dark);
+    background: rgba(255,255,255,.35); color: var(--pin-dark);
+    display: inline-flex; align-items: center; justify-content: center; flex: none;
+  }
+  .stopbtn i { width: 9px; height: 9px; background: currentColor; border-radius: 2px; }
+  .cap { font-size: 11px; color: var(--ink3); margin-top: 6px; }
+
+  /* ========== A · 纵向信息栈（现状优化版） ========== */
+  .va .note { padding: 20px 12px 12px; display: flex; flex-direction: column; }
+  .va .head { display: flex; gap: 7px; align-items: flex-start; }
+  .va .id { flex: none; margin-top: 3px; font-size: 11.5px; color: var(--ink2); font-variant-numeric: tabular-nums; }
+  .va .title { flex: 1; min-width: 0; }
+  .va .badge { margin-top: 1px; }
+  .va .divider { border: none; border-top: 1px dashed rgba(122,84,50,.25); margin: 9px 0 0; }
+  .va .row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink2); padding-top: 7px; font-variant-numeric: tabular-nums; }
+  .va .row .right { margin-left: auto; }
+  .va .prio-label { font-size: 11px; }
+
+  /* ========== B · 序号侧带 ========== */
+  .vb .note { display: flex; padding: 0; overflow: hidden; }
+  .vb .idband {
+    flex: none; width: 44px; display: flex; align-items: center; justify-content: center;
+    background: rgba(74,63,48,.07); border-right: 1px dashed rgba(122,84,50,.3);
+    font-family: var(--hand); font-size: 19px; color: var(--ink2);
+    writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 1px;
+  }
+  .vb .body { flex: 1; min-width: 0; padding: 20px 11px 11px; display: flex; flex-direction: column; gap: 7px; }
+  .vb .head { display: flex; gap: 6px; align-items: flex-start; }
+  .vb .title { flex: 1; min-width: 0; }
+  .vb .meta1, .vb .meta2 { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink2); font-variant-numeric: tabular-nums; }
+  .vb .meta2 { justify-content: space-between; }
+
+  /* ========== C · 标题优先 + 胶囊元信息 ========== */
+  .vc .note { padding: 20px 12px 12px; display: flex; flex-direction: column; gap: 9px; }
+  .vc .head { display: flex; gap: 6px; align-items: flex-start; }
+  .vc .title { flex: 1; min-width: 0; font-size: 16px; }
+  .vc .pills { display: flex; flex-wrap: wrap; gap: 5px; }
+  .vc .pill {
+    font-size: 11px; color: var(--ink2); background: rgba(255,255,255,.45);
+    border: 1px solid rgba(74,63,48,.25); border-radius: 999px; padding: 2px 9px;
+    display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums;
+  }
+  .vc .pill.prio-high { border-color: rgba(217,58,43,.5); color: var(--pin-dark); }
+  .vc .foot { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink2); }
+  .vc .foot .right { margin-left: auto; }
+
+  /* ========== D · 便签清单式 ========== */
+  .vd .note { padding: 20px 13px 0; display: flex; flex-direction: column; }
+  .vd .top { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--ink2); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+  .vd .top .badge { margin-left: auto; }
+  .vd .title { font-size: 16.5px; padding-bottom: 10px; }
+  .vd .foot {
+    border-top: 1px dashed rgba(122,84,50,.3); margin: 0 -13px; padding: 7px 13px 8px;
+    display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--ink2);
+    background: rgba(255,255,255,.25); font-variant-numeric: tabular-nums;
+  }
+  .vd .foot .right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+<h1>任务卡片布局 Demos V2</h1>
+<p class="sub">当前软木板/便利贴主题下的 4 个布局方向。每个方向三张样例：普通 / 超长标题 / 执行中（含 ⚙ 上次执行与 ⚠ 告警）。回复编号即可，例如「卡片选 B」。</p>
+
+<section class="variant va">
+  <h2>A · 纵向信息栈（现状优化版）</h2>
+  <p>保持上一轮的纵向每行一类信息，但用虚线分隔条理清节奏：标题区 → 优先级 → 评论数/时间 → 执行信息。改动最小、最克制。</p>
+  <div class="lane">
+    <div class="note">
+      <div class="head"><span class="id">#12</span><span class="title clamp2">首页加载速度优化</span><span class="badge">taskpin</span></div>
+      <hr class="divider"><div class="row"><span class="prio-dot high"></span><span class="prio-label">高优先级</span></div>
+      <div class="row"><span>💬 3</span><span class="right">🕐 08-26 14:20</span></div>
+      <div class="row"><span class="extag">⚙ kimi · k2 · 高 · yolo</span></div>
+    </div>
+    <div class="note">
+      <div class="head"><span class="id">#7</span><span class="title clamp2">重构任务详情抽屉的评论渲染逻辑，把历史评论折叠与答复模式合并到同一个输入框里</span><span class="badge">taskpin</span></div>
+      <hr class="divider"><div class="row"><span class="prio-dot normal"></span><span class="prio-label">中优先级</span></div>
+      <div class="row"><span>💬 12</span><span class="right">🕐 08-25 09:03</span></div>
+      <div class="row"><span class="failtag">⚠ 异常退出</span></div>
+    </div>
+    <div class="note pink">
+      <span class="hangtag">执行中</span>
+      <div class="head"><span class="id">#6</span><span class="title clamp2">操作优化</span><span class="badge">taskpin</span></div>
+      <hr class="divider"><div class="row"><span class="prio-dot normal"></span><span class="prio-label">中优先级</span></div>
+      <div class="row"><span>💬 8</span><span class="right">🕐 08-26 08:31</span></div>
+      <div class="row"><span class="runline">kimi 3:24</span><span class="right stopbtn"><i></i></span></div>
+    </div>
+  </div>
+</section>
+
+<section class="variant vb">
+  <h2>B · 序号侧带</h2>
+  <p>序号放大成左侧竖排色带（便签的「编号签」），正文区只放标题+项目徽章和两行元信息。序号最醒目，找任务最快；卡片略宽。</p>
+  <div class="lane">
+    <div class="note">
+      <div class="idband">#12</div>
+      <div class="body">
+        <div class="head"><span class="title clamp2">首页加载速度优化</span><span class="badge">taskpin</span></div>
+        <div class="meta1"><span class="prio-dot high"></span><span>高优先级</span><span class="extag">⚙ kimi · k2</span></div>
+        <div class="meta2"><span>💬 3</span><span>🕐 08-26 14:20</span></div>
+      </div>
+    </div>
+    <div class="note">
+      <div class="idband">#7</div>
+      <div class="body">
+        <div class="head"><span class="title clamp2">重构任务详情抽屉的评论渲染逻辑，把历史评论折叠与答复模式合并到同一个输入框里</span><span class="badge">taskpin</span></div>
+        <div class="meta1"><span class="prio-dot normal"></span><span>中优先级</span><span class="failtag">⚠ 异常退出</span></div>
+        <div class="meta2"><span>💬 12</span><span>🕐 08-25 09:03</span></div>
+      </div>
+    </div>
+    <div class="note pink">
+      <span class="hangtag">执行中</span>
+      <div class="idband">#6</div>
+      <div class="body">
+        <div class="head"><span class="title clamp2">操作优化</span><span class="badge">taskpin</span></div>
+        <div class="meta1"><span class="prio-dot normal"></span><span>中优先级</span></div>
+        <div class="meta2"><span class="runline">kimi 3:24</span><span class="stopbtn"><i></i></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="variant vc">
+  <h2>C · 标题优先 + 胶囊元信息</h2>
+  <p>标题最大最抢眼；其余信息全部收成一排小胶囊（#序号 / 项目 / 优先级 / 💬 / 🕐），自动换行不占固定行数；底部才是执行信息。信息密度最高、高度最省。</p>
+  <div class="lane">
+    <div class="note">
+      <div class="head"><span class="title clamp3">首页加载速度优化</span></div>
+      <div class="pills">
+        <span class="pill">#12</span><span class="pill">taskpin</span><span class="pill prio-high">● 高</span>
+        <span class="pill">💬 3</span><span class="pill">🕐 08-26 14:20</span>
+      </div>
+      <div class="foot"><span class="extag">⚙ kimi · k2 · 高 · yolo</span></div>
+    </div>
+    <div class="note">
+      <div class="head"><span class="title clamp3">重构任务详情抽屉的评论渲染逻辑，把历史评论折叠与答复模式合并到同一个输入框里</span></div>
+      <div class="pills">
+        <span class="pill">#7</span><span class="pill">taskpin</span><span class="pill">● 中</span>
+        <span class="pill">💬 12</span><span class="pill">🕐 08-25 09:03</span>
+      </div>
+      <div class="foot"><span class="failtag">⚠ 异常退出</span></div>
+    </div>
+    <div class="note pink">
+      <span class="hangtag">执行中</span>
+      <div class="head"><span class="title clamp3">操作优化</span></div>
+      <div class="pills">
+        <span class="pill">#6</span><span class="pill">taskpin</span><span class="pill">● 中</span>
+        <span class="pill">💬 8</span><span class="pill">🕐 08-26 08:31</span>
+      </div>
+      <div class="foot"><span class="runline">kimi 3:24</span><span class="right stopbtn"><i></i></span></div>
+    </div>
+  </div>
+</section>
+
+<section class="variant vd">
+  <h2>D · 便签清单式</h2>
+  <p>顶部一行小字（#序号+优先级点+项目徽章右置），标题手写体独占中间主体，底部贯通页脚放时间与执行信息——像一张真正的待办便签。层次最干净，长标题展示面积最大。</p>
+  <div class="lane">
+    <div class="note">
+      <div class="top"><span>#12</span><span class="prio-dot high"></span><span>高</span><span class="badge">taskpin</span></div>
+      <div class="title clamp3">首页加载速度优化</div>
+      <div class="foot"><span>💬 3</span><span>🕐 08-26 14:20</span><span class="right"><span class="extag">⚙ kimi · k2</span></span></div>
+    </div>
+    <div class="note">
+      <div class="top"><span>#7</span><span class="prio-dot normal"></span><span>中</span><span class="badge">taskpin</span></div>
+      <div class="title clamp3">重构任务详情抽屉的评论渲染逻辑，把历史评论折叠与答复模式合并到同一个输入框里</div>
+      <div class="foot"><span>💬 12</span><span>🕐 08-25 09:03</span><span class="right"><span class="failtag">⚠ 异常退出</span></span></div>
+    </div>
+    <div class="note pink">
+      <span class="hangtag">执行中</span>
+      <div class="top"><span>#6</span><span class="prio-dot normal"></span><span>中</span><span class="badge">taskpin</span></div>
+      <div class="title clamp3">操作优化</div>
+      <div class="foot"><span>💬 8</span><span>🕐 08-26 08:31</span><span class="right"><span class="runline">kimi 3:24</span><span class="stopbtn"><i></i></span></span></div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

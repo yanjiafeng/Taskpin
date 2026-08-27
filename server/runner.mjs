@@ -139,7 +139,26 @@ function findReasonixSessionFile(sessionId) {
   return null;
 }
 
+// Windows 下服务进程若未继承用户 PATH，spawn('kimi') 会 ENOENT。
+// 对常用安装位置做兜底：PATH 能找到就用 PATH，找不到时尝试各 agent 的默认绝对路径。
+function resolveAgentBinary(agent) {
+  if (process.platform !== 'win32') return agent;
+  const home = homedir();
+  const candidates = {
+    codex: [join(home, '.codex', 'bin', 'codex.exe'), join(home, 'AppData', 'Roaming', 'npm', 'codex.cmd')],
+    kimi: [join(home, '.kimi-code', 'bin', 'kimi.exe')],
+    reasonix: [join(home, '.reasonix', 'bin', 'reasonix.exe')],
+    dsh: [join(home, '.local', 'bin', 'dsh.exe'), join(home, 'AppData', 'Local', 'dsh', 'dsh.exe')],
+  }[agent];
+  if (!candidates) return agent;
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  return agent;
+}
+
 function buildCommand(agent, prompt, cwd, dbDir, { model, effort, permission, resumeId } = {}) {
+  const cmd = resolveAgentBinary(agent);
   if (agent === 'codex') {
     const args = ['exec'];
     const yolo = permission === 'yolo'; // YOLO：跳过所有审批且无沙箱（--dangerously-bypass-approvals-and-sandbox）
@@ -160,7 +179,7 @@ function buildCommand(agent, prompt, cwd, dbDir, { model, effort, permission, re
     if (EFFORTS.includes(effort)) args.push('-c', `model_reasoning_effort=${effort}`);
     if (resumeId) args.push(resumeId);
     args.push(prompt);
-    return { cmd: 'codex', args, cwd };
+    return { cmd, args, cwd };
   }
   if (agent === 'kimi') {
     // 注意：kimi 的 -p 不能与 --auto/-y 组合（0.36.0 实测报错 Cannot combine --prompt with --yolo）；
@@ -169,7 +188,7 @@ function buildCommand(agent, prompt, cwd, dbDir, { model, effort, permission, re
     if (resumeId) args.push('-S', resumeId);
     if (model) args.push('-m', model);
     args.push('-p', prompt);
-    return { cmd: 'kimi', args, cwd };
+    return { cmd, args, cwd };
   }
   if (agent === 'reasonix') {
     // reasonix run 是非交互模式；--resume 要会话文件完整路径（finish 时按 session_id 定位存库）。
@@ -181,7 +200,7 @@ function buildCommand(agent, prompt, cwd, dbDir, { model, effort, permission, re
     if (model) args.push('--model', model);
     if (EFFORTS.includes(effort)) args.push('--effort', effort);
     args.push(prompt);
-    return { cmd: 'reasonix', args, cwd };
+    return { cmd, args, cwd };
   }
   if (agent === 'dsh') {
     // DeepSeek Harness（dsh）：headless 一次性执行——新建会话、跑完、最终文本打 stdout，
@@ -193,7 +212,7 @@ function buildCommand(agent, prompt, cwd, dbDir, { model, effort, permission, re
     // session/event 实时写 stderr，与本捕获合并后在输出弹框可见。
     const perm = permission === 'yolo' ? 'danger-full-access'
       : CODEX_SANDBOXES.includes(permission) ? permission : 'workspace-write';
-    return { cmd: 'dsh', args: ['--profile', 'headless', prompt], cwd, env: { DSH_PERMISSION_MODE: perm } };
+    return { cmd, args: ['--profile', 'headless', prompt], cwd, env: { DSH_PERMISSION_MODE: perm } };
   }
   throw new DbError('VALIDATION', `unknown agent: ${agent} (${AGENT_NAMES.join('|')})`);
 }

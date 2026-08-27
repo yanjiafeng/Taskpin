@@ -54,3 +54,21 @@
 - 需求：对外公开地址修改成一下格式 ⏎ https://jungle-guys-familiar-concern.trycloudflare.com/#token=ZzX0wgSxUlHA8jd1lwcOhIWtP6RR1DeMwX_oHaga3sw
 - 结果：对外公开地址已改为 #token= 格式，按确认的验收标准逐项核对如下。 ⏎ 【变更内容】 ⏎ - public/app.js —— 分享弹框「复制完整链接」：?\`token=\` → \`<域名>/#token=<token>\`（token 经 encodeURIComponent；域名无尾斜杠时补 /，与任务描述示例格式一致） ⏎ - public/app.js adoptTokenFromUrl —— 新增从 location.hash 读 token（正则不误吞 & 后的其他片段，decodeURIComponent 还原），写入 localStorage 后从地址栏抹掉（抹除时保留 hash 其余片段，抹完只剩 # 则清空）；原 ?token= 直登逻辑保留兼容 ⏎ - README.md —— 「手机访问」两处的 ?token= 说明改为 #token=，并注明旧链接兼容 ⏎ - 服务端零改动：# 后片段本来就不发给服务器，checkAuth 无需动 ⏎ 【验证结果】 ⏎ - node --check public/app.js 通过 ⏎ - npm test：pass 40 / fail 0 ⏎ - 登录解析探针 6 用例全过：#token=abc-123 正常存入并抹净地址栏；URL 编码 token（a%20b）正确解码；#token=abc&x=1 抹 token 后保留 #x=1；#sec&token=abc 保留 #sec；旧 ?token=old 仍可登录；无 token 的 #other 不动 ⏎ - 链接生成实测：产出 https://aaa-bbb.trycloudflare.com/#token=ZzX0wgSxUlHA8jd1lwcOhIWtP6RR1DeMwX_oHaga3sw，与任务描述示例格式完全一致 ⏎ - 临时服务器（临时库，端口 47919）实测：/ 返回 200，下发的 app.js 含新 #token= 代码（4 处） ⏎ 【验收标准逐项核对】 ⏎ 1. 复制完整链接得到 hash 形式地址 → ✔（格式与描述示例逐字符一致） ⏎ 2. 打开链接免输 token 直登、地址栏抹掉 token → ✔（探针验证；逻辑与 ?token= 路径同一入口，存入 localStorage 后走既有 API/SSE 鉴权） ⏎ 3. 旧 ?token= 链接兼容 → ✔（探针用例 5） ⏎ 4. npm test 全绿 + README 同步 → ✔ 40/40 ⏎ 【注意】app.js 是静态文件，强刷页面（Cmd+Shift+R）即生效，无需重启服务。 ⏎ 遗留疑点：无。
 - 验收意见：开工
+
+## #4 声音播报
+- 验收时间：2026-08-25 03:36
+- 需求：使用语音将agent最近几轮的回答播放出来。语音要自然流畅，免费的，不用烧token的
+- 结果：## 「语音合成失败 404」原因与处理 ⏎ ### 原因 ⏎ 404 = 当前看板服务还是旧进程（PID 17028，改动前启动），`/api/tts` 端点还没加载。上轮我挂的延时重启脚本静默失败了：它跳过了杀进程、直接起了第二个服务实例，撞 EADDRINUSE 崩溃（taskpin-server.log 里的报错就是它）。也就是说代码本身没问题，是新代码一直没被服务加载。 ⏎ ### 本轮处理（纯运维，无代码改动） ⏎ 1. 验证了杀进程/起服务的每条命令：taskkill 语法转换正常、netstat 端口占用检查正常 ⏎ 2. 重写了重启脚本（/tmp/taskboard-tts-restart2.sh），修复点： ⏎ - 杀进程改用 PowerShell `Stop-Process -Force`（更可靠），并先单独带走 cloudflared 隧道子进程 ⏎ - 杀完**轮询确认端口真正释放**（最多 20s）才起新服务，杜绝再撞 EADDRINUSE ⏎ - 每步写日志到 /tmp/taskboard-tts-restart2.log，再出问题可直接看卡在哪 ⏎ - 保留防误杀：仅当 47824 仍被旧进程占用才动手 ⏎ 3. 用 `Start-Process` 独立进程树启动 watcher（脱离本会话进程组，避免随我退出被带走——上轮失败嫌疑之一） ⏎ 4. watcher 已确认激活，正等本轮执行结束后自动重启 ⏎ ### 如果你看到 EADDRINUSE ⏎ 若你上轮后自己跑过 `npm start`，那个报错是因为旧进程还占着 47824——不用管，watcher 本轮结束会自动处理。 ⏎ ### 接下来 ⏎ 本轮结束后服务自动重启（TOKEN/端口不变，隧道会停，公网访问到设置页重启隧道换新域名），然后**强刷页面**再点 🔊。若届时还有问题，/tmp/taskboard-tts-restart2.log 里有每步记录。
+- 验收意见：语音合成失败 404
+
+## #7 测试测试测试测试测试测试测试测试测试
+- 验收时间：2026-08-26 09:22
+- 需求：测试一下
+- 结果：收到「再试一下，直接返回」——直接返回，无其他操作。
+- 验收意见：再试一下，直接返回
+
+## #6 操作优化
+- 验收时间：2026-08-26 09:22
+- 需求：1.在执行和回答按钮后面加一个更换工具执行，然后点击执行和回答，直接使用上一次记录的模型和参数进行执行，如果没有上一次的记忆，再谈原本的选择模型和工具的框框。 ⏎ 2.历史的对话和评论布局换一下页面中上半部分只显示现在最新一轮的一对话，然后下面的历史对话不要显示了，增加一个按钮查看全部，然后再按照原有的顺序从上到下进行显示 ⏎ 3.发表评论按钮好像没啥用 ⏎ 4.主界面任务列表中的任务卡片样式调整一下，每行只显示一种信息，可以加高，下午名称显示在主题后边，然后序号也可以显示在主题前面，然后其他信息在下边再均匀分布一下，再设计设计。还要兼容一下主题名称很长的情况
+- 结果：【按选定方案落地完成】两个「都选 C」已实现到正式页面，并在运行中的真实看板上实测通过（附图 1 = 看板卡片实拍，附图 2 = 详情抽屉 split button 下拉展开实拍）。 ⏎ 【变更内容】（public/app.js + public/style.css，纯前端） ⏎ 1. 任务卡片 → 方案 C「标题优先 + 胶囊元信息」： ⏎ - 标题最大（16px 手写体）独占头部，超长 3 行 clamp 省略、全文在 title 悬浮 ⏎ - #序号 / 项目 / ●优先级（高优先级红边）/ 💬评论数 / 🕐更新时间 全部收成一排小胶囊，自动换行、不占固定行数 ⏎ - 底部行放 ⚙上次执行 / ⚠异常退出 / 执行中 agent 名+停止按钮（有才显示） ⏎ - 倾斜/图钉/缝线/吊牌动画、点击/拖拽不变；旧的 c-id/c-prio/c-info 行样式与 proj-badge/prio 色点 CSS 已清理 ⏎ 2. 详情按钮区 → 方案 C「Split button」： ⏎ - 一行搞定：左侧 📎 + 发表评论（答复模式下仍是「答复并继续」）；右侧拆分按钮——主区「▶ 执行 · kimi」直接用上次参数拉起，▾ 下拉出「💬 问答 · kimi」（仅 backlog/todo/blocked 状态显示）和「⚙ 更换工具/参数…」（开选择面板） ⏎ - 点菜单项或页面任意处自动收起；从未执行过的任务仍显示原来的「▶ 执行 / 问答」开面板按钮 ⏎ 3. 文档同步：README.md（快捷执行条目改述为拆分按钮）、AGENTS.md（抽屉与卡片描述）；demo 页保留在 docs/demos/（cards2-layouts.html / composer-actions.html，已登记 index.html） ⏎ 【验证结果】 ⏎ - node --check public/app.js 通过 ⏎ - node --test：pass 40 / fail 2（42 个用例；2 个失败仍是已知的 Windows teardown 删临时目录 EPERM 环境问题，与改动无关） ⏎ - agent-browser 实测真实看板（127.0.0.1:47824）：看板卡片已按方案 C 渲染（标题+胶囊行+底部执行行，执行中卡片吊牌/停止按钮正常）；打开任务详情，split button 渲染正常、点 ▾ 下拉展开「更换工具/参数」正常（待验收状态不出问答项，符合规则） ⏎ - 注意：实测期间发现另一位 agent 并行给抽屉加了 flushDrawerComment（执行前自动提交未发送评论），与本次 split button 改动共存无冲突，quickRun 已含该调用 ⏎ 【验收标准逐项核对】 ⏎ - 意见 1「发表评论/执行/更换三个按钮 PC 端布局改一下」→ ✔ 方案 C split button 落地并实拍验证 ⏎ - 意见 2「卡片布局不满意，用技能做 demo 静态页挑选后再优化」→ ✔ 上轮出 4 组 demo（agent-browser 截图）→ 你选定 C → 本轮落地并实拍验证 ⏎ 生效方式：静态文件，强刷（Ctrl+Shift+R）即可。 ⏎ 遗留疑点：移动端（≤768px）split button 会随按钮行 wrap，未真机实测；如有不适配可再调。
+- 验收意见：都选C

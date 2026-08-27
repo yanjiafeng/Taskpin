@@ -31,7 +31,10 @@
 - **问答模式**：执行前的需求澄清——Agent 只讨论不实现，通过评论来回问答，把需求/规则/验收标准写回任务描述；待规划/待办/阻塞可发起
 - **验收标准前置**：开发类任务没有「验收标准」时 Agent 不动手，给草案并进阻塞问你；交付时对照标准逐条自验证
 - **会话续跑**：打回重做时恢复原 CLI 会话（`codex exec resume` / `kimi -S` / `reasonix run --resume`），Agent 记得上轮细节；DSH 的 headless 模式不支持续跑（每次新会话），跨 Agent 同样靠评论继承记忆
-- **执行中提问**：Agent 遇到需要你决策的事会发 `[提问]` 评论并把任务置「阻塞」，抽屉里直接答复，「提交并继续」自动续跑会话
+- **执行中提问**：Agent 遇到需要你决策的事会发 `[提问]` 评论并把任务置「阻塞」；抽屉底部评论框自动进入「答复模式」（高亮 + 「答复并继续」），提交即答复并自动续跑会话——评论与答复共用一个输入框
+- **快捷执行**：任务执行过后，详情里的执行入口变成拆分按钮——主区「▶ 执行 · agent」用上次的模型/思考/权限一键再跑，不再弹选择面板；▾ 下拉里有「💬 问答 · agent」和「⚙ 更换工具/参数…」（打开面板改工具或参数）
+- **评论折叠**：任务详情默认只显示「最新一轮」对话，更早评论收进「▸ 查看更早评论」折叠条，点击展开按原顺序查看
+- **语音播报**：任务详情「最新一轮」旁 🔊 一键朗读 Agent 回答——免费、不烧 token；优先用浏览器内置 Web Speech API（手机端本机发声），浏览器不支持时自动走服务端 Windows SAPI 离线合成兜底；自动剥离 markdown、按句分段朗读，再点一次中断
 - **项目记忆与规则**：任务验收进 `done` 时摘要追加到主目录 `TASKBOARD_MEMORY.md`；跨任务规则可沉淀到 `TASKBOARD_RULES.md`，执行和问答都会先读
 - **多项目**：每个项目可配多个仓库路径（查找范围）和一个主目录（工作目录）；「全部项目」总览视图
 - **手机可用**：移动端纵向手风琴布局 + 按钮操作，不依赖拖拽；内置 cloudflared 隧道管理，一键把看板暴露到公网
@@ -89,7 +92,7 @@ TASKBOARD_TOKEN=你的随机长字符串 npm start
 - **执行即进「进行中」**：点击执行后任务自动流转到 `进行中`（待规划先经待办，阻塞/待验收直接流转；认领由看板自动完成，Agent 无需再 claim），卡片位置实时反映后台执行状态
 - 执行 prompt 内置了 manage-taskboard 协议（实现 → 自验证 → 交付待验收），且会先读主目录的 `TASKBOARD_MEMORY.md`（已验收任务的项目记忆）
 - **会话续跑**：执行结束自动把 CLI 会话 id 记入任务 `thread_id`；再次执行时若上次是同 agent 则恢复原会话（`codex exec resume <id>` / `kimi -S <id>` / `reasonix run --resume <会话文件>`），Agent 记得上轮改过的细节。跨 agent 执行无法续跑，自动开新会话、靠评论继承任务记忆
-- **执行中提问**：Agent 需要用户决策时会发 `[提问]` 评论并把任务置为「阻塞」（抽屉里该评论带"等你答复"徽章）；抽屉里出现内联答复框，「提交并继续」= 发评论 + 自动同 agent 续跑（阻塞续跑执行，待规划/待办续跑问答），也可以手动评论后重新执行
+- **执行中提问**：Agent 需要用户决策时会发 `[提问]` 评论并把任务置为「阻塞」（抽屉里该评论带"等你答复"徽章）；底部评论框自动进入「答复模式」（琥珀高亮，按钮变「答复并继续」），提交 = 发评论 + 自动同 agent 续跑（阻塞续跑执行，待规划/待办续跑问答），也可以手动评论后重新执行
 - **问答模式**：执行面板切到「问答」（仅待规划/待办/阻塞可发起，API `mode: 'qa'`），Agent 只讨论不实现、不自动流转状态；讨论结论由它结构化写回任务描述（需求/目标/规则约束/验收标准），跨任务规则可追加到主目录 `TASKBOARD_RULES.md`
 - **验收标准前置**：开发类任务描述中没有「验收标准」时，Agent 不动手实现——给 2-4 条标准草案发 `[提问]` 并置「阻塞」，问答补齐后放回待办再执行；交付时对照标准逐条验证。点执行时若描述缺标准，面板会提示建议先问答（不拦截）
 - **提示词模板可自定义**：设置页 →「执行提示词模板」可查看/修改新会话、续跑、问答三个模板（占位符 `{{task_id}}` `{{tctl}}` `{{project_name}}` `{{scope}}` `{{claim_step}}`），留空或点「恢复默认」回到内置版本
@@ -151,6 +154,62 @@ cp -r skills/manage-taskboard ~/.codex/skills/
 | `TASKBOARD_DB` | `~/.codex-task-dashiboard/taskboard.sqlite` | SQLite 数据文件 |
 | `TASKBOARD_TOKEN` | （空） | 访问 Token；暴露公网前必须设置，本机 Host 访问免校验 |
 | `REASONIX_HOME` | `~/.reasonix` | Reasonix 会话文件定位（续跑用） |
+
+## Windows 常见问题
+
+在 Windows（尤其通过非 Bash 终端启动服务）容易遇到下面几个坑：
+
+### 1. Kimi 执行报 `spawn kimi ENOENT`
+
+**现象**：点任务卡片上的 ▶ 执行 Kimi，评论里出现 `[runner] kimi 启动失败：spawn kimi ENOENT`。  
+**原因**：看板服务进程继承到的 `PATH` 里没有 `~/.kimi-code/bin`。当前终端能跑 `kimi --version`，不代表服务进程也能。  
+**解决**：
+- 代码已在 `server/runner.mjs` 里兜底：Windows 下会优先尝试 `~/.kimi-code/bin/kimi.exe`，一般重启服务即可生效。
+- 若仍失败，把 `C:\Users\<你的用户名>\.kimi-code\bin` 加到**系统 PATH**（不是用户 PATH），然后重启服务。
+- 如果之前用脚本修复 PATH 时留下了一条乱码条目（如 `C:Usersyan.kimi-codein`），请去「系统环境变量 → Path」里删掉。
+
+### 2. 点击「开始分享」报 `spawn cloudflared ENOENT`
+
+**现象**：顶栏 🌐 →「开始分享」直接报错，提示找不到 cloudflared。  
+**原因**：cloudflared 官方发布包在 GitHub Release，部分网络环境下本机无法直接下载。  
+**解决**：
+- 从 SourceForge 镜像下载对应版本的 `cloudflared-windows-amd64.exe`：
+  ```
+  https://sourceforge.net/projects/cloudflare-tunnel.mirror/files/<版本>/cloudflared-windows-amd64.exe/download
+  ```
+  例如 `2026.8.2` 版本：
+  ```
+  https://sourceforge.net/projects/cloudflare-tunnel.mirror/files/2026.8.2/cloudflared-windows-amd64.exe/download
+  ```
+- 下载后重命名为 `cloudflared.exe`，放到 `C:\Users\<你的用户名>\.local\bin\cloudflared.exe`。
+- 代码会自动查找这个路径；也可以显式设置环境变量：
+  ```powershell
+  $env:CLOUDFLARED_PATH="C:\Users\<你的用户名>\.local\bin\cloudflared.exe"
+  ```
+- 重启看板服务。
+
+### 3. 分享弹窗没有 Token / Token 显示「未设置 TASKBOARD_TOKEN」
+
+**现象**：公网分享弹窗里「访问 Token」为空。  
+**原因**：`TASKBOARD_TOKEN` 环境变量未设置。  
+**解决**：启动服务时带上 Token：
+
+```bash
+# Git Bash
+TASKBOARD_TOKEN=你的随机长字符串 node server/index.mjs
+```
+
+```powershell
+# PowerShell
+$env:TASKBOARD_TOKEN="你的随机长字符串"
+node server/index.mjs
+```
+
+本机 `localhost` / `127.0.0.1` 访问仍免 Token；手机/公网经隧道访问时必须带 Token。
+
+### 4. 局域网直连
+
+分享弹窗除了公网地址，还会显示一个「局域网地址」（如 `http://192.168.1.xxx:47824`）。同一 Wi-Fi 下的设备可以直接用这个地址访问，不需要 cloudflared。
 
 ## API 一览
 

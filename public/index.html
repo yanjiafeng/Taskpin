@@ -156,11 +156,13 @@
 
   <div id="share-backdrop" class="hidden">
     <div class="dlg share-dlg" role="dialog" aria-modal="true">
-      <h2>公网访问</h2>
-      <p class="settings-hint">通过 cloudflared 快速隧道把看板暴露到公网。链接含 Token，拿到的人即可操作看板，注意保密。</p>
+      <h2>分享访问</h2>
+      <p class="settings-hint">外网通过 cloudflared 快速隧道暴露；同一局域网也可直接通过局域网地址访问。链接/Token 拿到的人即可操作看板，注意保密。</p>
       <div id="share-status" class="settings-hint"></div>
       <label class="share-label">外网地址</label>
       <code id="share-url" class="share-value"></code>
+      <label class="share-label">局域网地址</label>
+      <code id="share-lan" class="share-value"></code>
       <label class="share-label">访问 Token</label>
       <code id="share-token" class="share-value"></code>
       <div class="dlg-actions">
