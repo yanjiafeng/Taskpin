@@ -77,11 +77,37 @@ test('完整任务流：建任务 → 认领 → 交付 → 验收', async () =>
   assert.equal(detail.data.comments.length, 1);
   assert.equal(detail.data.comments[0].body, '验收通过');
 
-  // 验收时主目录下生成了项目记忆
+  // 验收时主目录 .taskpin/ 下生成了项目记忆
   const { readFileSync } = await import('node:fs');
-  const mem = readFileSync(join(tmpMain, 'TASKBOARD_MEMORY.md'), 'utf8');
+  const mem = readFileSync(join(tmpMain, '.taskpin', 'TASKBOARD_MEMORY.md'), 'utf8');
   assert.match(mem, new RegExp(`## #${task.id} API 任务`));
   rmSync(tmpMain, { recursive: true, force: true });
+});
+
+test('任务标签：PATCH tags 数组生效，非法 tags 400', async () => {
+  const { data: projects } = await req('GET', '/api/projects');
+  const created = await req('POST', '/api/tasks', { project_id: projects[0].id, title: '标签任务' });
+  const task = created.data;
+  assert.equal(task.tags, '[]');
+
+  const patched = await req('PATCH', `/api/tasks/${task.id}`, { version: 1, tags: ['前端', '紧急', '前端'] });
+  assert.equal(patched.status, 200);
+  assert.deepEqual(JSON.parse(patched.data.tags), ['前端', '紧急']);
+  const detail = await req('GET', `/api/tasks/${task.id}`);
+  assert.deepEqual(JSON.parse(detail.data.tags), ['前端', '紧急']);
+
+  // 清空
+  const cleared = await req('PATCH', `/api/tasks/${task.id}`, { version: patched.data.version, tags: [] });
+  assert.equal(cleared.data.tags, '[]');
+
+  // 非法：非数组 / 超 8 个 / 单条超长 → 400 VALIDATION
+  const notArr = await req('PATCH', `/api/tasks/${task.id}`, { version: cleared.data.version, tags: 'a,b' });
+  assert.equal(notArr.status, 400);
+  assert.equal(notArr.data.error.code, 'VALIDATION');
+  const tooMany = await req('PATCH', `/api/tasks/${task.id}`, { version: cleared.data.version, tags: ['1', '2', '3', '4', '5', '6', '7', '8', '9'] });
+  assert.equal(tooMany.status, 400);
+  const tooLong = await req('PATCH', `/api/tasks/${task.id}`, { version: cleared.data.version, tags: ['x'.repeat(21)] });
+  assert.equal(tooLong.status, 400);
 });
 
 test('输入校验与 404', async () => {
@@ -217,6 +243,8 @@ test('settings：读取默认、局部更新、至少启用一个 Agent', async 
   // 执行 prompt 模板：内置默认值端点 + 覆盖/校验/恢复
   const defs = await req('GET', '/api/prompt-defaults');
   assert.ok(defs.data.new.includes('{{task_id}}') && defs.data.resume.includes('{{tctl}}'));
+  // 开工确认铁律：开发类任务需用户明确说「开工」才动工（new/resume 模板都带）
+  assert.ok(defs.data.new.includes('开工') && defs.data.resume.includes('开工'));
   assert.ok(defs.data.auto_claim.includes('taskctl list --status todo')); // 自动认领提示词
   const badTpl = await req('PATCH', '/api/settings', { prompt_new: '没有占位符的模板' });
   assert.equal(badTpl.status, 400);
@@ -330,6 +358,12 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     assert.ok(procs[0].args.includes('exec'));
     assert.equal(procs[0].args[procs[0].args.indexOf('-s') + 1], 'workspace-write');
     assert.equal(procs[0].opts.cwd, tmpMain); // 工作目录 = 项目主目录
+
+    // prompt：规则/记忆路径指向 .taskpin/，且注入了「项目记忆」节（最近全文 + 检索命中，替代全量读文件）
+    const prompt0 = procs[0].args[procs[0].args.length - 1];
+    assert.ok(prompt0.includes('.taskpin/TASKBOARD_RULES.md'));
+    assert.ok(prompt0.includes('项目记忆'));
+    assert.ok(prompt0.includes('memory search'));
 
     // 执行即流转：任务自动进「进行中」（自动认领），卡片位置反映后台执行
     const afterExec = await rq('GET', `/api/tasks/${tid}`);

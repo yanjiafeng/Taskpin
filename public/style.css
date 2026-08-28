@@ -388,6 +388,26 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   font-variant-numeric: tabular-nums;
 }
 .card .pill.prio-high { border-color: rgba(217, 58, 43, 0.5); color: var(--pin-dark); }
+/* 标签胶囊：美纹胶带风，与元信息胶囊（白底+实线描边+全圆角）一眼区分——
+   实色琥珀底白字、无描边、6px 方形圆角、# 前缀、轻微投影 */
+.card .c-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.card .tag-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, #f0a832, #dd8f14);
+  border: none;
+  border-radius: 6px;
+  padding: 2px 9px;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(160, 100, 10, 0.35);
+}
+.card .tag-pill.more { background: rgba(214, 158, 46, 0.25); color: var(--ink2); box-shadow: none; }
 .card .c-run {
   display: flex;
   align-items: center;
@@ -646,6 +666,47 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   color: var(--ink);
 }
 #drawer .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+/* 抽屉标签编辑器：chips（胶带风）+ 内联输入框 */
+#drawer .d-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid rgba(74, 63, 48, 0.4);
+  border-radius: 2px;
+  padding: 6px 8px;
+  background: var(--paper-field);
+}
+#drawer .d-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, #f0a832, #dd8f14);
+  border-radius: 6px;
+  padding: 2px 4px 2px 9px;
+}
+#drawer .d-tag-x {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 3px;
+}
+#drawer .d-tag-x:hover { color: #fff; }
+#drawer .d-tags input {
+  flex: 1;
+  min-width: 110px;
+  width: auto;
+  border: none;
+  background: transparent;
+  padding: 4px 2px;
+}
+#drawer .d-tags input:focus { outline: none; }
 #drawer .status-actions { flex-direction: column; }
 #drawer .status-actions .btn { text-align: left; }
 .status-name[data-status="backlog"] { color: var(--c-backlog); }

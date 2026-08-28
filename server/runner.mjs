@@ -6,7 +6,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getTask, updateTask, claimTask, addComment, setTaskThread, setTaskLastRun, setTaskUsage, setTaskExecOpts, listTasks, defaultDbPath, resolveMainDir, getSettings, AGENT_NAMES, DbError } from './db.mjs';
+import { getTask, updateTask, claimTask, addComment, setTaskThread, setTaskLastRun, setTaskUsage, setTaskExecOpts, listTasks, defaultDbPath, resolveMainDir, getSettings, recentMemories, searchMemories, AGENT_NAMES, DbError } from './db.mjs';
 
 export { AGENT_NAMES };
 
@@ -227,13 +227,14 @@ export const PROMPT_DEFAULTS = {
     '{{scope}}',
     '',
     '严格按以下流程执行：',
-    '1. 若当前工作目录（项目主目录）存在 TASKBOARD_RULES.md，先通读它——那是本项目的规则；若存在 TASKBOARD_MEMORY.md，同样通读——那是本项目已验收任务的记忆',
+    '1. 若当前工作目录（项目主目录）存在 .taskpin/TASKBOARD_RULES.md，先通读它——那是本项目的规则；本项目已验收任务的记忆见下方「项目记忆」节，需要更多历史细节时用 {{tctl}} memory search 检索',
     '2. {{tctl}} show {{task_id}} —— 完整阅读任务描述与全部评论（评论的 images 字段是图片绝对路径，需要时用读图工具查看）',
     '{{claim_step}}',
     '4. 验收标准检查（铁律）：若任务涉及代码改动/功能实现/文件产出（开发类），描述中必须有「验收标准」。没有 → 不要开始实现：comment（body 以 [提问] 开头，主动给出 2-4 条可验证的验收标准草案，如"运行 X 命令输出 Y"、"页面 Z 出现 W"）后 update --status blocked，等用户确认。拿不准算不算开发类时宁问勿猜；纯调研/问答类不强制',
-    '5. 在上述路径下定位对应仓库，完成实现，并运行相关测试自验证；开发类任务须对照描述中的「验收标准」逐条验证',
-    "6. {{tctl}} comment {{task_id}} --author agent --body '<结果摘要：变更内容、验证命令与结果、验收标准逐项核对、遗留疑点>'",
-    '7. {{tctl}} update {{task_id}} --status in_review --if-version <当前 version>',
+    '5. 开工确认（铁律）：开发类任务，只有任务描述或用户评论中明确出现「开工」二字时才允许开始实现。还没有 → 不要动手：comment（body 以 [提问] 开头，概述你的实现计划/方案要点，请用户确认后回复「开工」）后 update --status blocked，等用户确认（答复会触发续跑，届时再动工）。与第 4 步的验收标准同时缺失时，合并成一条 [提问] 一次问清；纯调研/问答类不受限',
+    '6. 在上述路径下定位对应仓库，完成实现，并运行相关测试自验证；开发类任务须对照描述中的「验收标准」逐条验证',
+    "7. {{tctl}} comment {{task_id}} --author agent --body '<结果摘要：变更内容、验证命令与结果、验收标准逐项核对、遗留疑点>'",
+    '8. {{tctl}} update {{task_id}} --status in_review --if-version <当前 version>',
     '',
     '需要用户决策或信息不全时，不要猜测：comment（body 以 [提问] 开头，列出问题和可选方案）后 update --status blocked，等用户答复并重新执行你（会续跑本会话）。无法解决的硬阻塞同样 comment 说明后置 blocked。',
     '禁止将任务置为 done（done 只能由用户验收）。',
@@ -242,8 +243,8 @@ export const PROMPT_DEFAULTS = {
     '继续看板任务 #{{task_id}}（你之前执行过，本会话是续跑）。看板 CLI：{{tctl}}',
     '严格按以下流程执行：',
     '1. {{tctl}} show {{task_id}} —— 重点阅读你上次交付/提问后用户新写的评论（答复或验收意见；images 字段是图片绝对路径，用读图工具查看）',
-    '2. 若主目录存在 TASKBOARD_RULES.md / TASKBOARD_MEMORY.md，按需参考',
-    '3. 按答复/意见继续修改，并运行相关测试自验证；开发类任务对照描述中的「验收标准」逐条验证；标准仍缺失时不要猜：comment（body 以 [提问] 开头，给出验收标准草案）后 update --status blocked 等用户确认',
+    '2. 若主目录存在 .taskpin/TASKBOARD_RULES.md，按需参考；项目记忆见下方「项目记忆」节，需要更多历史细节时用 {{tctl}} memory search 检索',
+    '3. 按答复/意见继续修改，并运行相关测试自验证；开发类任务对照描述中的「验收标准」逐条验证；标准仍缺失时不要猜：comment（body 以 [提问] 开头，给出验收标准草案）后 update --status blocked 等用户确认；开工确认同样适用：用户尚未明确说过「开工」（描述或任一用户评论含「开工」二字）时不要实现，comment（body 以 [提问] 开头，概述实现计划请用户回复「开工」）后 update --status blocked 等确认',
     "4. {{tctl}} comment {{task_id}} --author agent --body '<本轮变更摘要、验证结果、验收标准逐项核对、遗留疑点>'",
     '5. {{tctl}} update {{task_id}} --status in_review --if-version <当前 version>',
     '',
@@ -254,10 +255,10 @@ export const PROMPT_DEFAULTS = {
     '你是看板任务 #{{task_id}} 的问答 Agent：只讨论不实现（不改代码、不跑测试、不动项目文件，唯一允许的写操作见第 4 步）。看板 CLI：{{tctl}}',
     '',
     '严格按以下流程执行：',
-    '1. 若当前工作目录（项目主目录）存在 TASKBOARD_RULES.md / TASKBOARD_MEMORY.md，先通读',
+    '1. 若当前工作目录（项目主目录）存在 .taskpin/TASKBOARD_RULES.md，先通读；项目记忆见下方「项目记忆」节，需要更多历史细节时用 {{tctl}} memory search 检索',
     '2. {{tctl}} show {{task_id}} —— 完整阅读任务描述与全部评论；若最近有你的 [提问]，重点读用户之后的答复',
     '3. 与用户讨论：澄清需求、目标、规则与约束、验收标准，或继续讨论你之前提出的问题。还需要用户补充时：comment（body 以 [提问] 开头，一次别问太多，给建议选项或草案），然后结束本轮等用户答复（会续跑本会话），不要修改任务状态',
-    "4. 讨论充分后收尾：把结论结构化写回任务描述——{{tctl}} update {{task_id}} --if-version <当前 version> --desc '<重写后的描述，含 ## 需求 / ## 目标 / ## 规则与约束 / ## 验收标准（开发类任务必须有；给不出就先回第 3 步给草案问用户）>'；用户定下的跨任务规则可追加到主目录 TASKBOARD_RULES.md",
+    "4. 讨论充分后收尾：把结论结构化写回任务描述——{{tctl}} update {{task_id}} --if-version <当前 version> --desc '<重写后的描述，含 ## 需求 / ## 目标 / ## 规则与约束 / ## 验收标准（开发类任务必须有；给不出就先回第 3 步给草案问用户）>'；用户定下的跨任务规则可追加到主目录 .taskpin/TASKBOARD_RULES.md；收尾时提示用户：回复「开工」即启动实现（开发类任务未明确说「开工」不会动工）",
     "5. {{tctl}} comment {{task_id}} --author agent --body '<问答结论摘要>'",
     '6. 流转任务：未成熟回 backlog，已就绪进 todo，阻塞已解进 todo（{{tctl}} update --status backlog|todo --if-version <当前 version>）。禁止置 in_progress / in_review / done',
   ].join('\n'),
@@ -293,7 +294,24 @@ function renderTemplate(tpl, vars) {
   return tpl.replace(/\{\{(\w+)\}\}/g, (m, k) => (k in vars ? vars[k] : m));
 }
 
-function buildPrompt(task, projectPaths, { resume, mode, templates, agent } = {}) {
+// 项目记忆注入（替代全量读 TASKBOARD_MEMORY.md）：最近 N 条全文 + 按任务标题/描述 BM25 检索
+// （含时间衰减）的命中条。完整历史由 agent 按需用 taskctl memory search 自查。
+export function buildMemorySection(db, projectId, task) {
+  const tctl = `node ${TASKCTL}`;
+  const recent = recentMemories(db, projectId);
+  const query = `${task.title || ''}\n${task.description || ''}`.slice(0, 500);
+  const recentIds = new Set(recent.map((r) => r.id));
+  const hits = searchMemories(db, projectId, query).filter((h) => !recentIds.has(h.id));
+  const blocks = [];
+  if (recent.length) blocks.push(`【最近验收记忆 · ${recent.length} 条】\n${recent.map((r) => r.summary.trim()).join('\n\n')}`);
+  if (hits.length) blocks.push(`【相关历史命中 · ${hits.length} 条】\n${hits.map((r) => r.summary.trim()).join('\n\n')}`);
+  return [
+    `项目记忆（本项目已验收任务的记忆；完整检索：${tctl} memory search --project ${projectId} <关键词>）：`,
+    blocks.length ? blocks.join('\n\n') : '（暂无项目记忆）',
+  ].join('\n');
+}
+
+function buildPrompt(task, projectPaths, { resume, mode, templates, agent, memorySection } = {}) {
   const tctl = `node ${TASKCTL}`;
   const kind = mode === 'qa' ? 'qa' : resume ? 'resume' : 'new';
   const tpl = templates?.[kind]?.trim() ? templates[kind] : PROMPT_DEFAULTS[kind];
@@ -309,11 +327,12 @@ function buildPrompt(task, projectPaths, { resume, mode, templates, agent } = {}
     scope,
     claim_step: claimStep,
   });
+  const withMemory = memorySection ? `${prompt}\n\n${memorySection}` : prompt;
   // dsh 沙箱内 taskctl 直写看板数据库会被权限拦截；dsh-taskpin 插件工具走 HTTP 不受限
   if (agent === 'dsh') {
-    return `${prompt}\n\n环境提示：你运行在 DeepSeek Harness 中，已内置 taskboard_show / taskboard_comment / taskboard_transition 三个原生工具——回写看板（读任务/发评论/流转状态）优先用工具而不是 taskctl CLI。`;
+    return `${withMemory}\n\n环境提示：你运行在 DeepSeek Harness 中，已内置 taskboard_show / taskboard_comment / taskboard_transition 三个原生工具——回写看板（读任务/发评论/流转状态）优先用工具而不是 taskctl CLI。`;
   }
-  return prompt;
+  return withMemory;
 }
 
 export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
@@ -394,6 +413,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
         mode: execMode,
         agent,
         templates: { new: settings.prompt_new, resume: settings.prompt_resume, qa: settings.prompt_qa }, // 设置页的覆盖模板
+        memorySection: buildMemorySection(db, task.project_id, task),
       });
       const { cmd, args, env } = buildCommand(agent, prompt, cwd, dbDir, { ...options, resumeId });
 

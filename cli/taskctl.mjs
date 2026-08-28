@@ -4,7 +4,7 @@
 import {
   openDb, defaultDbPath, ensureDefaultProject,
   listProjects, createProject, updateProject, deleteProject, listTasks, getTaskWithComments,
-  createTask, claimTask, updateTask, addComment, saveAttachments, attachmentsDir, DbError,
+  createTask, claimTask, updateTask, addComment, saveAttachments, attachmentsDir, searchMemories, DbError,
 } from '../server/db.mjs';
 import { startServer } from '../server/index.mjs';
 import { readFileSync } from 'node:fs';
@@ -24,9 +24,10 @@ commands:
   show ID                                任务详情 + 全部评论
   create --title T [--project ID] [--desc D] [--status S] [--priority low|normal|high]
   claim ID [--thread-id X]               原子认领：todo -> in_progress
-  update ID --if-version N [--status S] [--title T] [--desc D] [--priority P] [--thread-id X]
+  update ID --if-version N [--status S] [--title T] [--desc D] [--priority P] [--thread-id X] [--tags a,b,c]
   done ID --if-version N                 用户验收：in_review -> done（仅用户）
   comment ID --body B [--author user|agent] [--image P]...   评论；--image 可多次附图（png/jpg/gif/webp）
+  memory search <关键词> [--project ID] [--limit N]   检索项目记忆（BM25 + 时间衰减；--project 不传则搜全部项目）
 
 env:
   TASKBOARD_DB   数据库文件路径（默认 ~/.codex-task-dashiboard/taskboard.sqlite）
@@ -142,6 +143,8 @@ function main() {
       if (pretty) {
         console.log(prettyTask(t));
         console.log(`project:#${t.project_id} ${t.project_name ?? ''}${t.project_path ? ` (${t.project_path})` : ''} created:${t.created_at} updated:${t.updated_at}`);
+        const tags = JSON.parse(t.tags || '[]');
+        if (tags.length) console.log(`tags: ${tags.join(', ')}`);
         console.log(t.description || '(no description)');
         t.comments.forEach((c) => {
           console.log(`\n[${c.author} ${c.created_at}]\n${c.body}`);
@@ -175,6 +178,7 @@ function main() {
       if (flags.desc != null) patch.description = flags.desc;
       if (flags.priority != null) patch.priority = flags.priority;
       if (flags['thread-id'] != null) patch.thread_id = flags['thread-id'];
+      if (flags.tags != null) patch.tags = parsePaths(flags.tags); // 逗号分隔；--tags "" 清空
       out(updateTask(db, id, patch, { by: flags['as-user'] === true ? 'user' : 'agent' }));
       return;
     }
@@ -182,6 +186,19 @@ function main() {
       const id = Number(need(pos[0], 'task id is required'));
       const version = Number(need(flags['if-version'], '--if-version is required'));
       out(updateTask(db, id, { version, status: 'done' }, { by: 'user' }));
+      return;
+    }
+    case 'memory': {
+      const sub = pos[0];
+      if (sub !== 'search') throw new DbError('VALIDATION', 'usage: taskctl memory search <关键词> [--project ID] [--limit N]');
+      const query = need(pos.slice(1).join(' '), 'memory search 需要关键词');
+      const limit = flags.limit != null ? Number(flags.limit) : undefined;
+      // --project 不传则搜全部项目（本地单机 CLI 属主本人）；传入时强制单项目隔离
+      const projectIds = flags.project != null ? [Number(flags.project)] : listProjects(db).map((p) => p.id);
+      const hits = projectIds.flatMap((pid) => searchMemories(db, pid, query, { limit: limit ?? 1000 }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit ?? 5);
+      out(hits);
       return;
     }
     case 'comment': {

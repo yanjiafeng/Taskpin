@@ -353,7 +353,17 @@ function cardHtml(t) {
       ? `<button class="run-btn" data-stop="${t.id}" title="进程尚未退出（任务已「${STATUS_META[t.status].label}」），点击停止 ${run.agent}"><span class="stop-ic"></span></button>`
       : '';
   // 布局方案 C（docs/demos/cards2-layouts.html 选定）：标题最大独占头部（3 行 clamp，全文在 title 悬浮），
-  // #序号/项目/优先级/💬评论数/🕐更新时间收成一排胶囊自动换行，底部行放执行摘要·告警·停止
+  // 标签行（胶带风胶囊，最多 3 个 + 「+N」）在标题下方，#序号/项目/优先级/💬评论数/🕐更新时间收成一排胶囊自动换行，
+  // 底部行放执行摘要·告警·停止
+  let tagsRow = '';
+  let tags = [];
+  try { tags = JSON.parse(t.tags || '[]'); } catch { tags = []; }
+  if (!Array.isArray(tags)) tags = [];
+  if (tags.length) {
+    const shown = tags.slice(0, 3).map((x) => `<span class="tag-pill">#${esc(x)}</span>`).join('');
+    const more = tags.length > 3 ? `<span class="tag-pill more">+${tags.length - 3}</span>` : '';
+    tagsRow = `<div class="c-tags" title="${esc(tags.map((x) => `#${x}`).join(' '))}">${shown}${more}</div>`;
+  }
   const runRow = (execTag || failBadge || runBtn)
     ? `<div class="c-run">${execTag}${failBadge}${runBtn}</div>` : '';
   return `
@@ -361,6 +371,7 @@ function cardHtml(t) {
       ${live ? '<span class="hang-tag">执行中</span>' : ''}
       ${orphan ? '<span class="orphan-tag" title="任务停在「进行中」但没有活跃执行进程（执行中断/失联），将自动收回「待规划」">⚠ 执行中断</span>' : ''}
       <div class="c-head"><span class="title" title="${esc(t.title)}">${esc(t.title)}</span></div>
+      ${tagsRow}
       <div class="c-pills">
         <span class="pill">#${t.id}</span>
         ${projPill}
@@ -890,6 +901,13 @@ function renderDrawer() {
   const sel = focusedId && draftIds.includes(focusedId)
     ? [document.activeElement.selectionStart, document.activeElement.selectionEnd]
     : null;
+  // 标签编辑草稿抢救：chips 是 DOM 态，重渲前读出暂存、渲染后回填（与上方文本草稿同思路）
+  const tagBox = document.getElementById('d-tags');
+  const tagDraft = tagBox ? [...tagBox.querySelectorAll('.d-tag')].map((el) => el.dataset.tag) : null;
+  let taskTags = [];
+  try { taskTags = JSON.parse(t.tags || '[]'); } catch { taskTags = []; }
+  if (!Array.isArray(taskTags)) taskTags = [];
+  const curTags = tagDraft ?? taskTags;
   const targets = TRANSITIONS[t.status] || [];
   const moveBtns = targets.filter((s) => s !== 'done').map((s) => (
     `<button class="btn" data-move="${s}" data-target="${s}">移到「${STATUS_META[s].label}」</button>`
@@ -1007,6 +1025,11 @@ function renderDrawer() {
         <select id="d-priority">
           ${Object.entries(PRIORITY_LABEL).map(([k, v]) => `<option value="${k}"${k === t.priority ? ' selected' : ''}>${v}</option>`).join('')}
         </select>
+        <label>标签</label>
+        <div class="d-tags" id="d-tags">
+          ${curTags.map((x) => `<span class="d-tag" data-tag="${esc(x)}">#${esc(x)}<button type="button" class="d-tag-x" title="删除标签">×</button></span>`).join('')}
+          <input id="d-tag-input" placeholder="回车或逗号添加" maxlength="20">
+        </div>
         <div class="row"><button class="btn primary" id="d-save">保存修改</button></div>
         <div class="d-sec">状态操作</div>
         <div class="row status-actions">${moveBtns || '<span style="color:var(--text-dim)">终态，无可用操作</span>'}</div>
@@ -1064,8 +1087,44 @@ function renderDrawer() {
   $('#drawer').querySelectorAll('.comment-img').forEach((img) => {
     img.onclick = () => openLightbox(img.src);
   });
+  // 标签编辑：× 删除；输入框按 Enter 或逗号加入（即时去重/超限提示；本地 DOM 态，「保存修改」才提交）
+  const drawerTagList = () => [...$('#d-tags').querySelectorAll('.d-tag')].map((el) => el.dataset.tag);
+  const addDrawerTag = (raw) => {
+    const name = raw.trim();
+    if (!name) return;
+    const cur = drawerTagList();
+    if (cur.includes(name)) { toast(`标签「${name}」已存在`, 'error'); return; }
+    if (name.length > 20) { toast('单个标签最多 20 字符', 'error'); return; }
+    if (cur.length >= 8) { toast('标签最多 8 个', 'error'); return; }
+    const chip = document.createElement('span');
+    chip.className = 'd-tag';
+    chip.dataset.tag = name;
+    chip.innerHTML = `#${esc(name)}<button type="button" class="d-tag-x" title="删除标签">×</button>`;
+    chip.querySelector('.d-tag-x').onclick = () => chip.remove();
+    $('#d-tags').insertBefore(chip, $('#d-tag-input'));
+  };
+  $('#d-tags').querySelectorAll('.d-tag-x').forEach((btn) => {
+    btn.onclick = () => btn.closest('.d-tag').remove();
+  });
+  const tagInput = $('#d-tag-input');
+  tagInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      addDrawerTag(tagInput.value.replace(/,$/, ''));
+      tagInput.value = '';
+    }
+  });
+  tagInput.addEventListener('input', () => {
+    if (/[,，]/.test(tagInput.value)) {
+      tagInput.value.split(/[,，]/).forEach((x) => addDrawerTag(x));
+      tagInput.value = '';
+    }
+  });
   $('#d-save').onclick = () => withLoading($('#d-save'), async () => {
     try {
+      // 输入框里未回车的内容也算一个待加标签，保存时一并收进
+      addDrawerTag(tagInput.value);
+      tagInput.value = '';
       const updated = await api(`/api/tasks/${t.id}`, {
         method: 'PATCH',
         body: {
@@ -1073,6 +1132,7 @@ function renderDrawer() {
           title: $('#d-title').value.trim(),
           description: $('#d-desc').value,
           priority: $('#d-priority').value,
+          tags: drawerTagList(),
           by: 'user',
         },
       });

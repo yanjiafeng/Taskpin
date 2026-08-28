@@ -1,13 +1,14 @@
 // 数据层测试：schema、状态机、乐观锁、原子认领。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   openDb, ensureDefaultProject, listProjects, createProject, updateProject, resolveMainDir,
-  listTasks, getTask, getTaskWithComments, createTask, claimTask, updateTask, addComment, setTaskLastRun, setTaskUsage, setTaskExecOpts, DbError,
+  listTasks, getTask, getTaskWithComments, createTask, claimTask, updateTask, addComment, setTaskLastRun, setTaskUsage, setTaskExecOpts,
+  normalizeTags, recentMemories, searchMemories, archiveProjectMemories, DbError,
 } from '../server/db.mjs';
 import { parseUsage } from '../server/runner.mjs';
 
@@ -127,13 +128,154 @@ test('进入 done 必须由用户验收，验收后写结构化项目记忆', ()
     const done = updateTask(db, review.id, { version: review.version, status: 'done' }, { by: 'user' });
     assert.equal(done.status, 'done');
 
-    // 主目录下生成结构化记忆
-    const mem = readFileSync(join(dir, 'TASKBOARD_MEMORY.md'), 'utf8');
+    // 主目录 .taskpin/ 下生成结构化记忆
+    const mem = readFileSync(join(dir, '.taskpin', 'TASKBOARD_MEMORY.md'), 'utf8');
     assert.match(mem, /# 项目记忆 · default/);
     assert.match(mem, new RegExp(`## #${t.id} task`));
     assert.match(mem, /- 验收时间：/);
     assert.match(mem, /- 需求：需求A/);
     assert.match(mem, /- 结果：结果摘要B/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('.taskpin 迁移：主目录根的旧记忆/规则文件在验收时移入 .taskpin/，新摘要追加其后', () => {
+  const db = freshDb();
+  const dir = mkdtempSync(join(tmpdir(), 'tb-mig-'));
+  try {
+    // 旧布局：根目录放 TASKBOARD_MEMORY.md / TASKBOARD_RULES.md
+    writeFileSync(join(dir, 'TASKBOARD_MEMORY.md'), '# 项目记忆 · default\n\n## #1 旧任务\n- 验收时间：2026-01-01 10:00\n');
+    writeFileSync(join(dir, 'TASKBOARD_RULES.md'), '# 规则\n- 老规矩\n');
+    const p = ensureDefaultProject(db);
+    updateProject(db, p.id, { mainDir: dir });
+    const t = createTask(db, { projectId: p.id, title: '新任务' });
+    let cur = claimTask(db, t.id);
+    cur = updateTask(db, cur.id, { version: cur.version, status: 'in_review' });
+    updateTask(db, cur.id, { version: cur.version, status: 'done' }, { by: 'user' });
+
+    // 两个旧文件都移入 .taskpin/，根目录不再保留
+    assert.ok(!existsSync(join(dir, 'TASKBOARD_MEMORY.md')));
+    assert.ok(!existsSync(join(dir, 'TASKBOARD_RULES.md')));
+    const mem = readFileSync(join(dir, '.taskpin', 'TASKBOARD_MEMORY.md'), 'utf8');
+    assert.match(mem, /## #1 旧任务/); // 旧记忆保留
+    assert.ok(mem.indexOf('## #1 旧任务') < mem.indexOf(`## #${t.id} 新任务`)); // 新摘要追加在其后
+    assert.equal(readFileSync(join(dir, '.taskpin', 'TASKBOARD_RULES.md'), 'utf8'), '# 规则\n- 老规矩\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('.taskpin 迁移：新旧文件同时存在时不动旧文件（避免覆盖新内容）', () => {
+  const db = freshDb();
+  const dir = mkdtempSync(join(tmpdir(), 'tb-mig-'));
+  try {
+    mkdirSync(join(dir, '.taskpin'));
+    writeFileSync(join(dir, 'TASKBOARD_MEMORY.md'), '旧根文件\n');
+    writeFileSync(join(dir, '.taskpin', 'TASKBOARD_MEMORY.md'), '# 项目记忆 · default\n\n新文件内容\n');
+    const p = ensureDefaultProject(db);
+    updateProject(db, p.id, { mainDir: dir });
+    const t = createTask(db, { projectId: p.id, title: '任务' });
+    let cur = claimTask(db, t.id);
+    cur = updateTask(db, cur.id, { version: cur.version, status: 'in_review' });
+    updateTask(db, cur.id, { version: cur.version, status: 'done' }, { by: 'user' });
+
+    // 旧文件原地保留，新摘要写进 .taskpin/ 里已有的文件
+    assert.equal(readFileSync(join(dir, 'TASKBOARD_MEMORY.md'), 'utf8'), '旧根文件\n');
+    const mem = readFileSync(join(dir, '.taskpin', 'TASKBOARD_MEMORY.md'), 'utf8');
+    assert.match(mem, /新文件内容/);
+    assert.match(mem, new RegExp(`## #${t.id} 任务`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('验收落库 memories 索引表（与 md 文件同事务）', () => {
+  const db = freshDb();
+  const dir = mkdtempSync(join(tmpdir(), 'tb-mem-'));
+  try {
+    const p = ensureDefaultProject(db);
+    updateProject(db, p.id, { mainDir: dir });
+    const t = createTask(db, { projectId: p.id, title: '索引任务', description: '需求X' });
+    let cur = claimTask(db, t.id);
+    cur = updateTask(db, cur.id, { version: cur.version, status: 'in_review' });
+    updateTask(db, cur.id, { version: cur.version, status: 'done' }, { by: 'user' });
+
+    const rows = db.prepare('SELECT * FROM memories WHERE project_id = ?').all(p.id);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].task_id, t.id);
+    assert.equal(rows[0].archived, 0);
+    assert.match(rows[0].summary, new RegExp(`## #${t.id} 索引任务`));
+    assert.match(rows[0].summary, /- 需求：需求X/);
+    // recentMemories 供 prompt 注入
+    assert.equal(recentMemories(db, p.id).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('记忆遗忘：超出 keep 的旧记忆折叠归档，主文件重写为最近 keep 条全文', () => {
+  const db = freshDb();
+  const dir = mkdtempSync(join(tmpdir(), 'tb-mem-'));
+  try {
+    const p = ensureDefaultProject(db);
+    updateProject(db, p.id, { mainDir: dir });
+    const accept = (title) => {
+      const t = createTask(db, { projectId: p.id, title });
+      let cur = claimTask(db, t.id);
+      cur = updateTask(db, cur.id, { version: cur.version, status: 'in_review' });
+      updateTask(db, cur.id, { version: cur.version, status: 'done' }, { by: 'user' });
+    };
+    accept('任务一');
+    accept('任务二');
+    accept('任务三');
+    // 默认 keep=50 不触发；显式 keep=2 归档最旧一条
+    assert.equal(archiveProjectMemories(db, p.id, 2), 1);
+
+    const archived = db.prepare('SELECT * FROM memories WHERE project_id = ? AND archived = 1').all(p.id);
+    assert.equal(archived.length, 1);
+    assert.match(archived[0].summary, /任务一/);
+    // 主文件只剩最近 2 条全文
+    const mem = readFileSync(join(dir, '.taskpin', 'TASKBOARD_MEMORY.md'), 'utf8');
+    assert.ok(!mem.includes('任务一'));
+    assert.match(mem, /任务二/);
+    assert.match(mem, /任务三/);
+    // 归档文件有一行摘要
+    const arch = readFileSync(join(dir, '.taskpin', 'TASKBOARD_MEMORY.archive.md'), 'utf8');
+    assert.match(arch, /任务一/);
+    // 检索仍覆盖归档条目
+    assert.ok(searchMemories(db, p.id, '任务一').length >= 1);
+    // 不超额时幂等返回 0（归档后非归档正好 2 条 = keep）
+    assert.equal(archiveProjectMemories(db, p.id, 2), 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('searchMemories：BM25 排序 + 时间衰减 + 项目隔离', () => {
+  const db = freshDb();
+  const dir = mkdtempSync(join(tmpdir(), 'tb-mem-'));
+  try {
+    const p = ensureDefaultProject(db);
+    updateProject(db, p.id, { mainDir: dir });
+    const ins = db.prepare('INSERT INTO memories (project_id, task_id, summary, created_at, archived) VALUES (?, ?, ?, ?, 0)');
+    const day = 86400000;
+    const nowMs = Date.now();
+    ins.run(p.id, 1, '## #1 修复登录超时\n- 结果：调整了 timeout 配置', new Date(nowMs - 60 * day).toISOString()); // 旧
+    ins.run(p.id, 2, '## #2 修复登录超时\n- 结果：调整了 timeout 配置', new Date(nowMs - 1 * day).toISOString()); // 新（同文）
+    ins.run(p.id, 3, '## #3 看板样式调整\n- 结果：改了卡片颜色', new Date(nowMs).toISOString());
+    const p2 = createProject(db, { name: 'other' });
+    ins.run(p2.id, 9, '## #9 登录 timeout', new Date(nowMs).toISOString());
+
+    const hits = searchMemories(db, p.id, '登录 timeout', { now: nowMs });
+    assert.ok(hits.length >= 2);
+    // 同文下新的排前面（时间衰减）
+    assert.equal(hits[0].task_id, 2);
+    assert.ok(hits.every((h) => h.score > 0));
+    // 不命中返回空；项目隔离：p2 的记忆不会出现在 p 的结果里
+    assert.ok(hits.every((h) => h.project_id === p.id));
+    assert.equal(searchMemories(db, p.id, '完全无关词zzz').length, 0);
+    assert.equal(searchMemories(db, p2.id, '登录').length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -284,6 +426,27 @@ test('exec_opts 执行选项记忆：写入/清除，不 bump version', () => {
 
   setTaskExecOpts(db, t.id, null);
   assert.equal(getTask(db, t.id).exec_opts, null);
+});
+
+test('任务标签：tags 列默认 []，updateTask 写入/校验/清空', () => {
+  const db = freshDb();
+  const p = ensureDefaultProject(db);
+  const t = createTask(db, { projectId: p.id, title: 'task' });
+  assert.equal(t.tags, '[]'); // 迁移列默认值
+
+  // roundtrip：自动去重去空
+  const updated = updateTask(db, t.id, { version: 1, tags: ['前端', ' 紧急 ', '前端', ''] });
+  assert.equal(JSON.parse(updated.tags).join(','), '前端,紧急');
+
+  // 清空
+  const cleared = updateTask(db, t.id, { version: updated.version, tags: [] });
+  assert.equal(cleared.tags, '[]');
+
+  // 校验：非数组 / 超 8 个 / 单条超长
+  assert.throws(() => updateTask(db, t.id, { version: cleared.version, tags: 'a,b' }), (e) => e.code === 'VALIDATION');
+  assert.throws(() => updateTask(db, t.id, { version: cleared.version, tags: ['1', '2', '3', '4', '5', '6', '7', '8', '9'] }), (e) => e.code === 'VALIDATION');
+  assert.throws(() => updateTask(db, t.id, { version: cleared.version, tags: ['x'.repeat(21)] }), (e) => e.code === 'VALIDATION');
+  assert.throws(() => normalizeTags(null), (e) => e.code === 'VALIDATION');
 });
 
 test('parseUsage：codex / reasonix 输出解析，kimi 与无用量输出返回 null', () => {

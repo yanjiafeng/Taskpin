@@ -35,22 +35,29 @@ node /Users/eric/codex-task-dashiboard/cli/taskctl.mjs <command>
    ```
    主动给 2-4 条可验证的标准草案（如"运行 X 命令输出 Y"），等用户确认。拿不准算不算开发类时宁问勿猜；纯调研/问答类不强制。
 
-5. **实现并自验证**：在任务描述指定的仓库/路径中完成实现，运行相关测试与检查；开发类任务须对照描述中的「验收标准」**逐条验证**。项目主目录若存在 `TASKBOARD_RULES.md`（项目规则）/`TASKBOARD_MEMORY.md`（已验收任务记忆），动手前先读。
+5. **开工确认（开发类任务铁律）**：开发类任务，只有任务描述或用户评论中明确出现「开工」二字时才允许开始实现。还没有就**不要动手**：
+   ```bash
+   taskctl comment <id> --body "[提问] 实现计划：1. …；2. …。确认请回复「开工」" --author agent
+   taskctl update <id> --status blocked --if-version <version>
+   ```
+   与验收标准同时缺失时合并成一条 [提问] 一次问清；用户答复「开工」后（答复会触发续跑）再动工；纯调研/问答类不受限。
 
-6. **交付（不自判完成）**：
+6. **实现并自验证**：在任务描述指定的仓库/路径中完成实现，运行相关测试与检查；开发类任务须对照描述中的「验收标准」**逐条验证**。项目主目录若存在 `.taskpin/TASKBOARD_RULES.md`（项目规则）/`.taskpin/TASKBOARD_MEMORY.md`（已验收任务记忆），动手前先读；记忆也可用 `taskctl memory search <关键词>` 检索（BM25 + 时间衰减）。
+
+7. **交付（不自判完成）**：
    ```bash
    taskctl comment <id> --body "<结果摘要：改了什么、验证结果、验收标准逐项核对、遗留疑点>" --author agent
    taskctl update <id> --status in_review --if-version <version>
    ```
    评论要包含：变更摘要、执行的验证命令及结果、验收标准逐项核对、未解决的疑点。
 
-7. **遇到阻塞**：确实无法继续（缺信息、缺权限、外部依赖失败）时：
+8. **遇到阻塞**：确实无法继续（缺信息、缺权限、外部依赖失败）时：
    ```bash
    taskctl comment <id> --body "<阻塞原因，需要什么帮助>" --author agent
    taskctl update <id> --status blocked --if-version <version>
    ```
 
-8. **需要用户决策（提问）**：信息不全或有多个合理方案时，**不要猜测**。以 `[提问]` 开头评论，列出问题和可选方案，然后置 `blocked` 等答复：
+9. **需要用户决策（提问）**：信息不全或有多个合理方案时，**不要猜测**。以 `[提问]` 开头评论，列出问题和可选方案，然后置 `blocked` 等答复：
    ```bash
    taskctl comment <id> --body "[提问] <问题>；方案 A：…；方案 B：…；你倾向哪个？" --author agent
    taskctl update <id> --status blocked --if-version <version>
