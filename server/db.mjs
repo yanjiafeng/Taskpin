@@ -340,7 +340,8 @@ export function ensureDefaultProject(db) {
 export const AGENT_NAMES = ['codex', 'kimi', 'reasonix', 'dsh'];
 // prompt_new/prompt_resume/prompt_qa：执行/问答 prompt 模板覆盖（null = 用 runner.mjs 的 PROMPT_DEFAULTS）
 // tunnel_url：最近一次 cloudflared 隧道域名（隧道断开后展示用，由 tunnel.mjs 写入）
-const SETTING_DEFAULTS = () => ({ agents: [...AGENT_NAMES], prompt_new: null, prompt_resume: null, prompt_qa: null, tunnel_url: null });
+// access_token：访问 Token（null = 未设置；设置页可随机生成，改完即时生效；TASKBOARD_TOKEN 环境变量优先于它）
+const SETTING_DEFAULTS = () => ({ agents: [...AGENT_NAMES], prompt_new: null, prompt_resume: null, prompt_qa: null, tunnel_url: null, access_token: null });
 const SETTING_KEYS = Object.keys(SETTING_DEFAULTS());
 const PROMPT_KEYS = ['prompt_new', 'prompt_resume', 'prompt_qa'];
 
@@ -358,7 +359,8 @@ export function updateSettings(db, patch = {}) {
   const cur = getSettings(db);
   const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
   const del = db.prepare('DELETE FROM settings WHERE key = ?');
-  for (const [key, value] of Object.entries(patch)) {
+  for (const [key, rawValue] of Object.entries(patch)) {
+    let value = rawValue;
     if (!SETTING_KEYS.includes(key)) throw new DbError('VALIDATION', `unknown setting: ${key}`);
     // null / 空串 = 清除覆盖，恢复默认
     if (value === null || value === '') {
@@ -378,6 +380,12 @@ export function updateSettings(db, patch = {}) {
         if (!value.includes(ph)) throw new DbError('VALIDATION', `${key} 缺少必需占位符 ${ph}`);
       }
     }
+    if (key === 'access_token') {
+      if (typeof value !== 'string' || !value.trim()) {
+        throw new DbError('VALIDATION', 'access_token 必须是非空字符串（传 null 清除）');
+      }
+      value = value.trim();
+    }
     upsert.run(key, JSON.stringify(value));
     cur[key] = value;
   }
@@ -386,10 +394,13 @@ export function updateSettings(db, patch = {}) {
 
 // ---------- tasks ----------
 
-export function listTasks(db, { projectId, status, includeCanceled = true } = {}) {
+export function listTasks(db, { projectId, projectIds, status, includeCanceled = true } = {}) {
   const where = [];
   const args = [];
-  if (projectId != null) { where.push('project_id = ?'); args.push(projectId); }
+  // projectIds（多选筛选，主界面项目多选用）优先于 projectId；空数组 = 不过滤
+  if (projectIds != null) {
+    if (projectIds.length) { where.push(`project_id IN (${projectIds.map(() => '?').join(',')})`); args.push(...projectIds); }
+  } else if (projectId != null) { where.push('project_id = ?'); args.push(projectId); }
   if (status) { where.push('status = ?'); args.push(status); }
   if (!includeCanceled) { where.push("status != 'canceled'"); }
   const sql = `SELECT tasks.*, (SELECT COUNT(*) FROM comments WHERE comments.task_id = tasks.id) AS comment_count FROM tasks${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY tasks.id`;

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>项目多选筛选 · 交互设计 Demo（任务 #70）</title>
+<style>
+  /* 与正式 style.css 同源的软木板/便利贴主题变量 */
+  :root {
+    --cork: #c89866; --cream: #f7edd8;
+    --ink: #4a3f30; --ink2: #7a6a52;
+    --paper: #fbf3df; --paper-edge: rgba(122, 84, 50, 0.4);
+    --pin: #d93a2b;
+    --hand: "Marker Felt", "Chalkboard SE", "Comic Sans MS", cursive;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+    background-color: var(--cork);
+    background-image:
+      radial-gradient(rgba(122, 84, 50, 0.16) 1.2px, transparent 1.5px),
+      repeating-linear-gradient(0deg, rgba(120, 80, 45, 0.05) 0 2px, transparent 2px 9px);
+    background-size: 26px 26px, auto;
+    color: var(--ink); font-size: 14px; padding: 32px 28px 60px;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; color: var(--cream); text-shadow: 0 1px 2px rgba(0,0,0,.3); }
+  .sub { color: #5d4526; font-size: 13px; margin-bottom: 26px; max-width: 780px; line-height: 1.7; }
+  .variant { margin-bottom: 48px; }
+  .variant > h2 { font-size: 16px; margin-bottom: 3px; color: var(--cream); text-shadow: 0 1px 2px rgba(0,0,0,.3); }
+  .variant > p { font-size: 12.5px; color: #5d4526; margin-bottom: 14px; max-width: 760px; line-height: 1.6; }
+
+  /* 顶栏仿真条：多选控件的真实栖息地 */
+  .topbar {
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(60, 40, 20, 0.35);
+    border: 1px dashed rgba(247, 237, 216, 0.35);
+    border-radius: 8px; padding: 10px 14px; max-width: 720px;
+  }
+  .brand { color: var(--cream); font-weight: 700; font-family: var(--hand); letter-spacing: .5px; }
+  .topbar .spacer { flex: 1; }
+  .ghost-btn {
+    border: 1px solid rgba(247, 237, 216, 0.3); background: rgba(255,255,255,.06);
+    color: var(--cream); border-radius: 4px; min-width: 32px; height: 32px; padding: 0 8px;
+  }
+
+  /* ===== 多选控件（与正式实现同结构：按钮 + 浮层 checkbox 面板） ===== */
+  .pms { position: relative; min-width: 0; }
+  .pms-btn {
+    border: 1px solid rgba(247, 237, 216, 0.35);
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 4px; padding: 5px 8px;
+    color: var(--cream); font: inherit; min-width: 0; max-width: 170px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+  }
+  .pms-btn::after { content: ' ▾'; font-size: 11px; }
+  .pms-btn[aria-expanded="true"]::after { content: ' ▴'; }
+  .pms-panel {
+    position: absolute; top: calc(100% + 6px); left: 0;
+    min-width: 180px; max-width: 240px; max-height: 60vh; overflow-y: auto;
+    background: var(--paper); color: var(--ink);
+    border: 1px solid var(--paper-edge); border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(60, 40, 20, 0.28);
+    padding: 4px; z-index: 25;
+  }
+  .pms-panel.static { position: static; margin-top: 8px; box-shadow: 0 4px 12px rgba(60,40,20,.3); }
+  .pms-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: 4px; cursor: pointer;
+    font-size: 13px; white-space: nowrap; overflow: hidden;
+  }
+  .pms-item:hover { background: rgba(122, 84, 50, 0.1); }
+  .pms-item input { accent-color: var(--ink); flex: none; }
+  .pms-item .cnt { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ink2); }
+
+  /* 手机框 */
+  .phone {
+    width: 375px; border: 3px solid #3a2c1a; border-radius: 18px;
+    padding: 10px; background: rgba(60,40,20,.25);
+  }
+  .phone .topbar { max-width: none; padding: 8px 10px; gap: 6px; }
+  .phone .pms-btn { max-width: 104px; }
+
+  .note {
+    background: var(--paper); border: 1px solid var(--paper-edge); border-radius: 3px;
+    padding: 12px 16px; max-width: 720px; font-size: 13px; line-height: 1.8;
+    box-shadow: 0 3px 8px rgba(60,40,20,.2); position: relative;
+  }
+  .note::before {
+    content: ''; position: absolute; top: -9px; left: 50%; transform: translateX(-50%) rotate(-1.5deg);
+    width: 72px; height: 18px; background: rgba(255, 243, 160, 0.75);
+    box-shadow: 0 1px 2px rgba(60,40,20,.25);
+  }
+  .note b { font-family: var(--hand); }
+  .note code { font-family: var(--mono); font-size: 12px; background: rgba(122,84,50,.12); padding: 1px 5px; border-radius: 3px; }
+  .log { font-family: var(--mono); font-size: 12px; color: var(--ink2); margin-top: 10px; min-height: 18px; }
+</style>
+</head>
+<body>
+<h1>项目多选筛选 · 交互设计</h1>
+<p class="sub">任务 #70。设计语言沿用产品既有方向：软木板顶栏 + 纸质浮层，不做新风格发明——多选控件是顶栏原生下拉的「原地升级」，按钮形态不变、浮层用与评论/卡片同源的纸张质感。交互要点：点按钮开合面板、checkbox 连续多选不收起、「全部项目」与具体项目互斥（点全部 = 清空选择）、点面板外或 Esc 收起、选中态持久化（刷新保留）。</p>
+
+<div class="variant">
+  <h2>状态 1 · 默认「全部项目」（未选任何项目）</h2>
+  <p>按钮显示「全部项目」，看板不过滤。空选择 = 全部，与旧单选的 all 语义一致。</p>
+  <div class="topbar">
+    <span class="brand">📌 Taskpin</span>
+    <div class="pms">
+      <button class="pms-btn" type="button" aria-expanded="false">全部项目</button>
+    </div>
+    <span class="spacer"></span>
+    <button class="ghost-btn">💰</button><button class="ghost-btn">⚙</button>
+  </div>
+</div>
+
+<div class="variant">
+  <h2>状态 2 · 选中 1 个 / N 个项目（收起态摘要）</h2>
+  <p>单选时显示项目名；多选时收敛为「N 个项目」，避免顶栏被超长文本挤爆（移动端 max-width 104px 省略）。</p>
+  <div class="topbar">
+    <span class="brand">📌 Taskpin</span>
+    <div class="pms"><button class="pms-btn" type="button" aria-expanded="false">Taskpin</button></div>
+    <div class="pms"><button class="pms-btn" type="button" aria-expanded="false">3 个项目</button></div>
+    <span class="spacer"></span>
+    <button class="ghost-btn">⚙</button>
+  </div>
+</div>
+
+<div class="variant">
+  <h2>状态 3 · 面板展开（可交互，点 checkbox 试试）</h2>
+  <p>「全部项目」是互斥项：勾选它即清空其余；勾选任一项目则「全部」自动取消。行尾灰字是该项目的任务数（可选增强，正式版先不做）。勾选手不收起面板，可连续多选；点面板外 / Esc 收起。</p>
+  <div class="topbar" style="align-items:flex-start">
+    <span class="brand">📌 Taskpin</span>
+    <div class="pms">
+      <button class="pms-btn" id="demo-btn" type="button" aria-expanded="true">2 个项目</button>
+      <div class="pms-panel static" id="demo-panel">
+        <label class="pms-item"><input type="checkbox" data-pms="all"> 全部项目</label>
+        <label class="pms-item"><input type="checkbox" data-pms="1" checked> Taskpin <span class="cnt">12</span></label>
+        <label class="pms-item"><input type="checkbox" data-pms="2" checked> 博客重构 <span class="cnt">5</span></label>
+        <label class="pms-item"><input type="checkbox" data-pms="3"> 微信小程序 <span class="cnt">8</span></label>
+        <label class="pms-item"><input type="checkbox" data-pms="4"> 内部工具与脚本平台开发 <span class="cnt">21</span></label>
+      </div>
+    </div>
+    <span class="spacer"></span>
+    <button class="ghost-btn">⚙</button>
+  </div>
+  <div class="log" id="demo-log">筛选：project_id=1,2</div>
+</div>
+
+<div class="variant">
+  <h2>状态 4 · 移动端 375px</h2>
+  <p>窄屏下按钮收缩为 ≤104px 省略号；面板从按钮下缘展开、纵向滚动，全部操作是 tap，无 hover 依赖。</p>
+  <div class="phone">
+    <div class="topbar">
+      <span class="brand">📌</span>
+      <div class="pms"><button class="pms-btn" type="button" aria-expanded="false">3 个项目</button></div>
+      <span class="spacer"></span>
+      <button class="ghost-btn">💰</button><button class="ghost-btn">⚙</button>
+    </div>
+  </div>
+</div>
+
+<div class="note">
+  <b>落地约定</b>（对照 Web Interface Guidelines 的可及性要点）：按钮带 <code>aria-haspopup/aria-expanded</code>；面板项用原生 <code>&lt;label&gt;+&lt;input type=checkbox&gt;</code>，键盘 Tab/空格天然可用；Esc 与外部点击收起；选中态写 <code>localStorage.taskboard_projects</code>；接口侧 <code>GET /api/tasks?project_id=1,2,3</code> 逗号分隔，单值语义不变。
+</div>
+
+<script>
+  const panel = document.getElementById('demo-panel');
+  const btn = document.getElementById('demo-btn');
+  const log = document.getElementById('demo-log');
+  const names = { 1: 'Taskpin', 2: '博客重构', 3: '微信小程序', 4: '内部工具与脚本平台开发' };
+  panel.addEventListener('change', (e) => {
+    const v = e.target.dataset.pms;
+    if (v === 'all') {
+      panel.querySelectorAll('input[data-pms]:not([data-pms="all"])').forEach((i) => { i.checked = false; });
+    } else if (e.target.checked) {
+      panel.querySelector('input[data-pms="all"]').checked = false;
+    }
+    const sel = [...panel.querySelectorAll('input[data-pms]:not([data-pms="all"]):checked')].map((i) => i.dataset.pms);
+    const allBox = panel.querySelector('input[data-pms="all"]');
+    if (sel.length === 0) allBox.checked = true;
+    btn.textContent = sel.length === 0 ? '全部项目' : sel.length === 1 ? names[sel[0]] : `${sel.length} 个项目`;
+    log.textContent = `筛选：${sel.length ? 'project_id=' + sel.join(',') : '（全部，不带参数）'}`;
+  });
+</script>
+</body>
+</html>

@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { watch } from 'node:fs';
 import { basename, dirname, join, normalize, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openDb, ensureDefaultProject, defaultDbPath, attachmentsDir as attachmentsDirOf } from './db.mjs';
+import { openDb, ensureDefaultProject, defaultDbPath, attachmentsDir as attachmentsDirOf, getSettings } from './db.mjs';
 import { createApiHandler } from './api.mjs';
 import { createRunner } from './runner.mjs';
 import { createTunnel } from './tunnel.mjs';
@@ -27,7 +27,8 @@ const CONTENT_TYPES = {
   '.webmanifest': 'application/manifest+json',
 };
 
-// 暴露到公网（内网穿透）前务必设置 TASKBOARD_TOKEN。
+// 暴露到公网（内网穿透）前务必设置访问 Token：环境变量 TASKBOARD_TOKEN 优先，
+// 否则用设置页保存的 settings.access_token（可随机生成，改完即时生效、无需重启）。
 // 客户端可用 Authorization: Bearer <token> 或 ?token=<token>（SSE 只能后者）。
 // Host 为 localhost/127.0.0.1/::1 的本机访问免认证（隧道流量的 Host 是公网域名，不受影响）。
 // 注意：若 HOST=0.0.0.0 监听局域网，同网段可伪造 Host: localhost 绕过——公网/局域网暴露务必确认
@@ -41,8 +42,7 @@ function isLocalRequest(req) {
   }
 }
 
-function checkAuth(req, url) {
-  const expected = process.env.TASKBOARD_TOKEN;
+function checkAuth(req, url, expected) {
   if (!expected) return true;
   if (isLocalRequest(req)) return true;
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -57,6 +57,9 @@ function checkAuth(req, url) {
 export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota } = {}) {
   const db = openDb(dbPath);
   ensureDefaultProject(db);
+
+  // 生效的访问 Token：环境变量优先，其次设置页保存的值（每次请求现查，改设置即时生效）
+  const effectiveToken = () => process.env.TASKBOARD_TOKEN || getSettings(db).access_token || '';
 
   const sseClients = new Set();
   function sseSend(res, msg) {
@@ -112,7 +115,7 @@ export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota } = {})
     const url = new URL(req.url, 'http://localhost');
 
     if (url.pathname === '/api/events') {
-      if (!checkAuth(req, url)) {
+      if (!checkAuth(req, url, effectiveToken())) {
         res.writeHead(401, { 'content-type': 'application/json' });
         return res.end(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'invalid token' } }));
       }
@@ -128,7 +131,7 @@ export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota } = {})
     }
 
     if (url.pathname.startsWith('/api/')) {
-      if (!checkAuth(req, url)) {
+      if (!checkAuth(req, url, effectiveToken())) {
         res.writeHead(401, { 'content-type': 'application/json' });
         return res.end(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'invalid token' } }));
       }
@@ -167,12 +170,12 @@ export function startServer({
   host = process.env.HOST || '127.0.0.1',
   dbPath,
 } = {}) {
-  const { server, dbPath: usedDbPath, tunnel } = createApp({ dbPath, port });
+  const { server, db, dbPath: usedDbPath, tunnel } = createApp({ dbPath, port });
   server.listen(port, host, () => {
     console.log(`taskboard: http://${host}:${port}`);
     console.log(`database:  ${usedDbPath}`);
-    if (!process.env.TASKBOARD_TOKEN) {
-      console.log('warning: TASKBOARD_TOKEN is not set; do not expose this service publicly without it');
+    if (!process.env.TASKBOARD_TOKEN && !getSettings(db).access_token) {
+      console.log('warning: no access token set (TASKBOARD_TOKEN env or settings page); do not expose this service publicly without one');
     }
   });
   // 服务退出时带走隧道进程，不留孤儿隧道（域名失效但进程空转）

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node server/index.mjs",
+    "dev": "node --watch server/index.mjs",
     "taskctl": "node cli/taskctl.mjs",
     "test": "node --test \"./test/**/*.test.mjs\""
   }

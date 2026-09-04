@@ -81,7 +81,7 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
         if (!quota) return sendJson(res, 404, { error: { code: 'NOT_FOUND', message: 'quota not configured' } });
         return sendJson(res, 200, await quota.get({ refresh: url.searchParams.get('refresh') === '1' }));
       }
-      // settings（目前只有 agents：启用的执行 Agent）
+      // settings（agents：启用的执行 Agent；prompt_*：模板覆盖；access_token：访问 Token，由隧道自动管理）
       if (req.method === 'GET' && url.pathname === '/api/settings') {
         return sendJson(res, 200, getSettings(db));
       }
@@ -167,8 +167,11 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
         const projectId = url.searchParams.get('project_id');
         const status = url.searchParams.get('status');
         const includeCanceled = url.searchParams.get('include_canceled') === '1';
+        // project_id 支持逗号分隔多选（"1,2,3"）；单个值保持原语义，非法段忽略
+        const projectIds = projectId == null ? undefined
+          : projectId.split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
         return sendJson(res, 200, listTasks(db, {
-          projectId: projectId == null ? undefined : Number(projectId),
+          projectIds,
           status: status || undefined,
           includeCanceled,
         }));

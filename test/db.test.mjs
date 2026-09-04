@@ -306,6 +306,10 @@ test('listTasks 过滤与取消任务可见性', () => {
   assert.equal(listTasks(db, { projectId: p1.id, includeCanceled: false }).length, 0);
   assert.equal(listTasks(db, {}).length, 2);
   assert.equal(listTasks(db, { status: 'canceled' }).length, 1);
+  // 多项目筛选（主界面项目多选）：IN 查询；空数组 = 不过滤
+  assert.equal(listTasks(db, { projectIds: [p1.id, p2.id] }).length, 2);
+  assert.equal(listTasks(db, { projectIds: [p2.id] }).length, 1);
+  assert.equal(listTasks(db, { projectIds: [] }).length, 2);
 });
 
 test('updateProject 改名、改路径列表、清空', () => {

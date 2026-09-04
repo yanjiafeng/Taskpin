@@ -131,6 +131,21 @@ test('列表过滤', async () => {
   assert.ok(doneOnly.data.every((t) => t.status === 'done'));
 });
 
+test('列表过滤：project_id 逗号分隔多选', async () => {
+  const p2 = (await req('POST', '/api/projects', { name: '多选测试项目' })).data;
+  await req('POST', '/api/tasks', { project_id: p2.id, title: '多选项目任务' });
+  const { data: projects } = await req('GET', '/api/projects');
+  const ids = projects.map((p) => p.id);
+  const multi = await req('GET', `/api/tasks?project_id=${ids.join(',')}`);
+  assert.equal(multi.status, 200);
+  const all = await req('GET', '/api/tasks?include_canceled=1');
+  assert.equal(multi.data.length, all.data.length); // 选中全部项目 = 不过滤
+  assert.ok(multi.data.some((t) => t.title === '多选项目任务'));
+  const single = await req('GET', `/api/tasks?project_id=${p2.id}`);
+  assert.ok(single.data.length >= 1);
+  assert.ok(single.data.every((t) => t.project_id === p2.id));
+});
+
 test('TASKBOARD_TOKEN 认证（本机 Host 免认证）', async (t) => {
   process.env.TASKBOARD_TOKEN = 'test-secret';
   t.after(() => delete process.env.TASKBOARD_TOKEN);
@@ -153,6 +168,35 @@ test('TASKBOARD_TOKEN 认证（本机 Host 免认证）', async (t) => {
   assert.equal(await viaHost('/api/projects', { ...extHost, authorization: 'Bearer test-secret' }), 200);
   assert.equal(await viaHost('/api/projects', { ...extHost, authorization: 'Bearer wrong' }), 401);
   assert.equal(await viaHost('/api/projects?token=test-secret', extHost), 200); // SSE 只能走 query
+});
+
+test('设置页保存的 access_token 参与认证（无需环境变量/重启）', async (t) => {
+  t.after(async () => { await req('PATCH', '/api/settings', { access_token: null }); }); // 清理，别影响后续测试
+
+  // 保存即生效
+  const saved = await req('PATCH', '/api/settings', { access_token: 'settings-secret' });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.access_token, 'settings-secret');
+
+  const { get } = await import('node:http');
+  const viaHost = (path, headers) => new Promise((resolve, reject) => {
+    const r = get(base + path, { headers }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    r.on('error', reject);
+  });
+  const extHost = { host: 'xxx.trycloudflare.com' };
+  assert.equal(await viaHost('/api/projects', extHost), 401);
+  assert.equal(await viaHost('/api/projects', { ...extHost, authorization: 'Bearer settings-secret' }), 200);
+  assert.equal(await viaHost('/api/projects?token=settings-secret', extHost), 200);
+
+  // 空白字符串 → 400；null → 清除（外部 Host 恢复免认证）
+  const bad = await req('PATCH', '/api/settings', { access_token: '   ' });
+  assert.equal(bad.status, 400);
+  const cleared = await req('PATCH', '/api/settings', { access_token: null });
+  assert.equal(cleared.data.access_token, null);
+  assert.equal(await viaHost('/api/projects', extHost), 200);
 });
 
 test('静态页面与 SSE 端点', async () => {
@@ -713,6 +757,9 @@ test('tunnel：启动、域名持久化、重生成、停止', async () => {
     assert.equal(s.state, 'running');
     assert.equal(s.url, 'https://aaa-bbb-ccc.trycloudflare.com');
     assert.equal(s.live, true);
+    // 首次启动隧道自动生成访问 Token
+    assert.ok(s.token, '启动隧道应自动生成 Token');
+    const token1 = s.token;
 
     // 进程退出 → stopped，仍显示上次域名（live=false）
     procs[0].proc.emit('exit', 0);
@@ -721,20 +768,26 @@ test('tunnel：启动、域名持久化、重生成、停止', async () => {
     assert.equal(s.url, 'https://aaa-bbb-ccc.trycloudflare.com');
     assert.equal(s.live, false);
 
-    // 重新生成（已停止时 = 直接启动新进程）
-    await rq('POST', '/api/tunnel/restart');
+    // 重新生成（已停止时 = 直接启动新进程）；同时换新 Token，响应立即进入 starting
+    const r1 = await rq('POST', '/api/tunnel/restart');
+    assert.equal(r1.data.state, 'starting');
+    assert.ok(r1.data.token && r1.data.token !== token1, '重新生成应换新 Token');
     assert.equal(procs.length, 2);
     procs[1].proc.stderr.emit('data', Buffer.from('https://ddd-eee-fff.trycloudflare.com\n'));
-    assert.equal((await rq('GET', '/api/tunnel')).data.url, 'https://ddd-eee-fff.trycloudflare.com');
+    s = (await rq('GET', '/api/tunnel')).data;
+    assert.equal(s.url, 'https://ddd-eee-fff.trycloudflare.com');
+    const token2 = s.token;
 
-    // 运行中 restart → 杀旧进程，其退出后自动起新进程
-    await rq('POST', '/api/tunnel/restart');
+    // 运行中 restart → 响应立即进入 starting；杀旧进程，其退出后自动起新进程
+    const r2 = await rq('POST', '/api/tunnel/restart');
+    assert.equal(r2.data.state, 'starting');
     await tick(); // 等 kill 触发的 exit 回调
     assert.equal(procs.length, 3);
     procs[2].proc.stderr.emit('data', Buffer.from('https://ggg-hhh-iii.trycloudflare.com\n'));
     s = (await rq('GET', '/api/tunnel')).data;
     assert.equal(s.state, 'running');
     assert.equal(s.url, 'https://ggg-hhh-iii.trycloudflare.com');
+    assert.ok(s.token && s.token !== token2, '运行中重新生成也应换新 Token');
 
     // 停止
     await rq('POST', '/api/tunnel/stop');

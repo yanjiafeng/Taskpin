@@ -124,7 +124,8 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   border-radius: 50%;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
-#project-select {
+#project-select { position: relative; min-width: 0; }
+#project-select-btn {
   border: 1px solid rgba(247, 237, 216, 0.35);
   background: rgba(0, 0, 0, 0.15);
   border-radius: 4px;
@@ -133,9 +134,42 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   font: inherit;
   min-width: 0;
   max-width: 170px;
+  overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
 }
-#project-select option { color: var(--ink); background: var(--paper); }
+#project-select-btn::after { content: ' ▾'; font-size: 11px; }
+#project-select-btn[aria-expanded="true"]::after { content: ' ▴'; }
+#project-select-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 180px;
+  max-width: 240px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--paper-edge);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(60, 40, 20, 0.28);
+  padding: 4px;
+  z-index: 25;
+}
+.pms-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pms-item:hover { background: rgba(122, 84, 50, 0.1); }
+.pms-item input { accent-color: var(--ink); flex: none; }
 #topbar .btn.ghost {
   border: 1px solid rgba(247, 237, 216, 0.3);
   background: rgba(255, 255, 255, 0.06);
@@ -1171,17 +1205,6 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 .sp-info { flex: 1; min-width: 0; }
 .sp-name { font-weight: 600; }
 .sp-paths { font-family: var(--mono); font-size: 11px; color: var(--ink3); overflow-wrap: break-word; }
-.token-row { display: flex; align-items: center; gap: 10px; }
-#token-view {
-  flex: 1;
-  font-family: var(--mono);
-  font-size: 12px;
-  background: var(--paper-field);
-  border: 1px solid rgba(74, 63, 48, 0.3);
-  border-radius: 2px;
-  padding: 6px 10px;
-  overflow-wrap: break-word;
-}
 
 /* ---------- Toast：小纸条 ---------- */
 #toast {
@@ -1259,7 +1282,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   #drawer .status-actions .btn, #drawer .row .btn, #comment-form .btn { min-height: 40px; }
   #topbar { gap: 6px; }
   .brand { font-size: 13px; gap: 6px; }
-  #project-select { max-width: 104px; }
+  #project-select-btn { max-width: 104px; }
   #quota-bar { top: 52px; }
   .quota-card { min-width: 160px; }
 }

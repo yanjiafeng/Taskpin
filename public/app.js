@@ -79,7 +79,8 @@ function md(src) {
 
 const state = {
   projects: [],
-  projectId: null, // null = 全部项目
+  projectIds: loadProjectIds(), // 多选项目筛选（[] = 全部项目），持久化在 localStorage
+  projectPanelOpen: false, // 多选面板展开状态（SSE/项目重载重渲时保持）
   tasks: [],
   runs: new Map(), // taskId -> {agent, pid, started_at}
   colToggles: {}, // 移动端手风琴：col -> true=固定展开 / false=固定折叠
@@ -94,6 +95,17 @@ const state = {
 
 // ---------- Token 与 API ----------
 function getToken() { return localStorage.getItem('taskboard_token') || ''; }
+
+// 项目多选筛选的持久化（taskboard_projects，JSON 数组；[] = 全部项目）
+function loadProjectIds() {
+  try {
+    const v = JSON.parse(localStorage.getItem('taskboard_projects') || '[]');
+    return Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0) : [];
+  } catch { return []; }
+}
+function saveProjectIds() {
+  localStorage.setItem('taskboard_projects', JSON.stringify(state.projectIds));
+}
 
 // 支持 ?token=xxx 与 #token=xxx 链接直接登录：写入 localStorage 后从地址栏抹掉
 // （#token= 是分享链接格式：hash 不发给服务器，只能在这里读出；?token= 保留兼容旧链接）
@@ -120,7 +132,7 @@ async function api(path, { method = 'GET', body } = {}) {
   if (body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   if (res.status === 401) {
-    const t = await promptDlg('需要访问 Token（服务端 TASKBOARD_TOKEN）：', token);
+    const t = await promptDlg('需要访问 Token（服务端设置或 TASKBOARD_TOKEN）：', token);
     if (t !== null) {
       localStorage.setItem('taskboard_token', t.trim());
       return api(path, { method, body });
@@ -207,16 +219,16 @@ async function loadAgentOptions() {
 
 async function loadProjects() {
   state.projects = await api('/api/projects');
-  if (state.projectId != null && !state.projects.some((p) => p.id === state.projectId)) {
-    state.projectId = null; // 项目被删则回退到「全部」
-  }
+  const before = state.projectIds.length;
+  state.projectIds = state.projectIds.filter((id) => state.projects.some((p) => p.id === id));
+  if (state.projectIds.length !== before) saveProjectIds(); // 项目被删则从筛选中剔除
   renderProjectSelect();
   renderSettingsProjects();
   await loadTasks();
 }
 
 async function loadTasks() {
-  const qs = state.projectId == null ? '' : `project_id=${state.projectId}&`;
+  const qs = state.projectIds.length ? `project_id=${state.projectIds.join(',')}&` : '';
   const [tasks, runs] = await Promise.all([
     api(`/api/tasks?${qs}include_canceled=1`),
     api('/api/runs'),
@@ -281,12 +293,39 @@ function visibleTasks(status) {
   return state.tasks.filter((t) => t.status === status);
 }
 
+// 项目多选筛选控件：按钮显示摘要，面板内 checkbox 多选；「全部项目」= 清空选择
 function renderProjectSelect() {
-  const sel = $('#project-select');
-  sel.innerHTML = `<option value="all"${state.projectId == null ? ' selected' : ''}>全部项目</option>`
+  const btn = $('#project-select-btn');
+  const panel = $('#project-select-panel');
+  const n = state.projectIds.length;
+  btn.textContent = n === 0 ? '全部项目'
+    : n === 1 ? (state.projects.find((p) => p.id === state.projectIds[0])?.name ?? '全部项目')
+    : `${n} 个项目`;
+  btn.setAttribute('aria-expanded', state.projectPanelOpen ? 'true' : 'false');
+  panel.classList.toggle('hidden', !state.projectPanelOpen);
+  if (!state.projectPanelOpen) return; // 收起时不必重建列表
+  panel.innerHTML = `<label class="pms-item"><input type="checkbox" data-pms="all"${n === 0 ? ' checked' : ''}> 全部项目</label>`
     + state.projects.map((p) => (
-      `<option value="${p.id}"${p.id === state.projectId ? ' selected' : ''}>${esc(p.name)}</option>`
+      `<label class="pms-item"><input type="checkbox" data-pms="${p.id}"${state.projectIds.includes(p.id) ? ' checked' : ''}> ${esc(p.name)}</label>`
     )).join('');
+}
+
+function setProjectPanel(open) {
+  state.projectPanelOpen = open;
+  renderProjectSelect();
+}
+
+function toggleProjectFilter(v) {
+  if (v === 'all') state.projectIds = [];
+  else {
+    const id = Number(v);
+    const i = state.projectIds.indexOf(id);
+    if (i >= 0) state.projectIds.splice(i, 1);
+    else state.projectIds.push(id);
+  }
+  saveProjectIds();
+  renderProjectSelect(); // 面板保持展开，可连续勾选多个
+  loadTasks().catch((err) => toast(err.message, 'error'));
 }
 
 function fmtElapsed(startedAt) {
@@ -904,6 +943,20 @@ function renderDrawer() {
   // 标签编辑草稿抢救：chips 是 DOM 态，重渲前读出暂存、渲染后回填（与上方文本草稿同思路）
   const tagBox = document.getElementById('d-tags');
   const tagDraft = tagBox ? [...tagBox.querySelectorAll('.d-tag')].map((el) => el.dataset.tag) : null;
+  // 滚动位置抢救：与草稿同理——重渲重建 innerHTML 后滚动容器都是新元素、scrollTop 归零，
+  // 用户还在看下面的内容就被踢回顶部。记录三个滚动容器（桌面 .d-comments-scroll/.d-props、
+  // 移动端 .d-cols）的 scrollTop，渲染后回填；评论流若本来就贴底（距底 <24px，与输出弹框
+  // outputStick 同阈值）则渲染后跟进新底部，不错过新评论
+  const SCROLL_SAVED = ['.d-comments-scroll', '.d-props', '.d-cols'];
+  const scrollTops = {};
+  for (const css of SCROLL_SAVED) {
+    const el = $('#drawer').querySelector(css);
+    if (el) scrollTops[css] = el.scrollTop;
+  }
+  const commentsScrollEl = $('#drawer').querySelector('.d-comments-scroll');
+  const stickBottom = commentsScrollEl
+    ? commentsScrollEl.scrollHeight - commentsScrollEl.scrollTop - commentsScrollEl.clientHeight < 24
+    : false;
   let taskTags = [];
   try { taskTags = JSON.parse(t.tags || '[]'); } catch { taskTags = []; }
   if (!Array.isArray(taskTags)) taskTags = [];
@@ -1064,10 +1117,21 @@ function renderDrawer() {
     const el = document.getElementById(id);
     if (el) el.value = v;
   }
+  // 回填滚动位置（渲染前抢救的）；评论流贴底则跟进新底部
+  for (const [css, top] of Object.entries(scrollTops)) {
+    const el = $('#drawer').querySelector(css);
+    if (el) el.scrollTop = top;
+  }
+  if (stickBottom) {
+    const el = $('#drawer').querySelector('.d-comments-scroll');
+    if (el) el.scrollTop = el.scrollHeight;
+  }
   if (focusedId) {
     const el = document.getElementById(focusedId);
     if (el) {
-      el.focus();
+      // preventScroll：focus 默认会把焦点元素滚动进可视区（比如底部的评论框/答复框），
+      // 会把刚回填的滚动位置又冲掉——这就是修复后仍「乱跳」的来源
+      el.focus({ preventScroll: true });
       if (sel && el.setSelectionRange) {
         try { el.setSelectionRange(sel[0], sel[1]); } catch { /* number 等类型不支持，忽略 */ }
       }
@@ -1151,6 +1215,8 @@ function renderDrawer() {
           method: 'PATCH',
           body: { version: state.openTask.version, status: btn.dataset.move, by: 'user' },
         });
+        // 取消后任务从看板隐藏（默认不显示已取消列），留着抽屉就是对着一个看板上看不到的任务
+        if (btn.dataset.move === 'canceled') closeDrawer();
         scheduleReload();
       } catch (err) {
         toast(err.message, 'error');
@@ -1166,6 +1232,7 @@ function renderDrawer() {
           body: { version: state.openTask.version, status: 'done', by: 'user' },
         });
         toast('已验收 ✓');
+        closeDrawer(); // 验收 = 任务完结，关掉明细页回看板
         scheduleReload();
       } catch (err) {
         toast(err.message, 'error');
@@ -1334,7 +1401,6 @@ function openSettings() {
   renderSettingsProjects();
   syncAgentToggles();
   renderPromptSettings();
-  $('#token-view').textContent = getToken() || '（未设置）';
   $('#board').classList.add('hidden');
   $('#settings-page').classList.remove('hidden');
 }
@@ -1486,13 +1552,14 @@ async function refreshShare() {
     + (!s.live && s.url && s.state !== 'starting' ? '（下方是上次使用的域名，已失效）' : '');
   $('#share-url').textContent = s.url || '（尚未生成）';
   $('#share-lan').textContent = s.lanUrl || '（未获取到局域网地址）';
-  $('#share-token').textContent = s.token || '（未设置 TASKBOARD_TOKEN）';
+  $('#share-token').textContent = s.token || '（未设置）';
   const active = s.state === 'running' || s.state === 'starting';
   $('#share-start').classList.toggle('hidden', active);
   $('#share-stop').classList.toggle('hidden', !active);
   $('#share-regen').classList.toggle('hidden', s.state !== 'running');
   const copyBtn = $('#share-copy');
-  const linkUrl = s.url || s.lanUrl || null;
+  // 只用活着的公网域名拼链接；隧道停止/重启中 s.url 是已失效的旧域名，落到局域网地址
+  const linkUrl = (s.live ? s.url : null) || s.lanUrl || null;
   copyBtn.dataset.link = linkUrl ? (s.token ? `${linkUrl}/#token=${encodeURIComponent(s.token)}` : linkUrl) : '';
   copyBtn.disabled = !linkUrl;
   clearInterval(shareTimer);
@@ -1571,8 +1638,8 @@ function openTaskForm(status = 'todo') {
   $('#task-form-title').textContent = `新建任务 → ${STATUS_LABEL[status] || status}`;
   const sel = $('#tf-project');
   sel.innerHTML = state.projects.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
-  // 当前筛选是单项目则默认该项目，否则默认第一个
-  sel.value = String(state.projectId ?? state.projects[0]?.id ?? '');
+  // 当前筛选恰好是单项目则默认该项目，否则默认第一个
+  sel.value = String(state.projectIds.length === 1 ? state.projectIds[0] : state.projects[0]?.id ?? '');
   $('#tf-title-input').value = '';
   $('#tf-desc').value = '';
   $('#modal-backdrop').classList.remove('hidden');
@@ -1674,10 +1741,22 @@ function init() {
       syncAgentToggles();
     };
   });
-  $('#project-select').onchange = async (e) => {
-    state.projectId = e.target.value === 'all' ? null : Number(e.target.value);
-    await loadTasks();
+  // 项目多选筛选：点按钮开合面板；checkbox 变更委托处理（面板 innerHTML 会重建，事件绑在容器上）；
+  // 点面板外任意处或按 Esc 收起
+  $('#project-select-btn').onclick = (e) => {
+    e.stopPropagation();
+    setProjectPanel(!state.projectPanelOpen);
   };
+  $('#project-select-panel').addEventListener('change', (e) => {
+    const v = e.target.dataset?.pms;
+    if (v != null) toggleProjectFilter(v);
+  });
+  document.addEventListener('click', (e) => {
+    if (state.projectPanelOpen && !e.target.closest('#project-select')) setProjectPanel(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && state.projectPanelOpen) setProjectPanel(false);
+  });
   $('#settings-btn').onclick = openSettings;
   $('#settings-close').onclick = closeSettings;
   // 额度区：💰 切换显示，展开状态持久化
@@ -1823,14 +1902,6 @@ function init() {
         toast(err.message, 'error');
       }
     });
-  };
-  $('#token-btn').onclick = async () => {
-    const cur = getToken();
-    const t = await promptDlg(cur ? '更新 Token（清空则删除）：' : '设置访问 Token：', cur);
-    if (t === null) return;
-    if (t.trim()) localStorage.setItem('taskboard_token', t.trim());
-    else localStorage.removeItem('taskboard_token');
-    location.reload();
   };
   // 抽屉也只靠 × 按钮关闭（点背板不关闭）
   // 灯箱：点击任意处或 Esc 关闭

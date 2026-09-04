@@ -38,7 +38,7 @@
 - **语音播报**：任务详情「最新一轮」旁 🔊 一键朗读 Agent 回答——免费、不烧 token；优先用浏览器内置 Web Speech API（手机端本机发声），浏览器不支持时自动走服务端 Windows SAPI 离线合成兜底；自动剥离 markdown、按句分段朗读，再点一次中断
 - **项目记忆与规则**：任务验收进 `done` 时摘要追加到主目录 `.taskpin/TASKBOARD_MEMORY.md` 并落库 `memories` 索引表；执行 prompt 自动注入「最近 N 条全文 + BM25 检索命中（含时间衰减）」，更多历史用 `taskctl memory search` 检索；超出最近 50 条的旧记忆折叠归档到 `.taskpin/TASKBOARD_MEMORY.archive.md`。跨任务规则可沉淀到 `.taskpin/TASKBOARD_RULES.md`，执行和问答都会先读
 - **任务标签**：任务可挂多个标签（明细抽屉维护，≤8 个/单个 ≤20 字符），卡片标题下方以胶带风胶囊展示
-- **多项目**：每个项目可配多个仓库路径（查找范围）和一个主目录（工作目录）；「全部项目」总览视图
+- **多项目**：每个项目可配多个仓库路径（查找范围）和一个主目录（工作目录）；顶栏项目筛选支持多选（checkbox 面板，选中态本地持久化），「全部项目」总览视图
 - **手机可用**：移动端纵向手风琴布局 + 按钮操作，不依赖拖拽；内置 cloudflared 隧道管理，一键把看板暴露到公网
 - **自定义提示词**：执行（新会话/续跑）和问答三个模板都可在设置页查看、修改、恢复默认
 - **亮暗双主题**，SSE 实时刷新（`taskctl` CLI 直写 SQLite 也会经数据库文件监听触发广播），乐观锁防并发冲突，原子认领防重复执行；对话框点外部不关闭，操作按钮带 loading 防重复点击
@@ -49,6 +49,7 @@
 
 ```bash
 npm start            # 或 node server/index.mjs
+npm run dev          # 开发模式：node --watch，改动服务端代码自动重启（前端是静态文件，刷新页面即可）
 # 打开 http://127.0.0.1:47824
 ```
 
@@ -72,7 +73,7 @@ cloudflared tunnel --url http://127.0.0.1:47824
 # 或 frpc 配置 local_port = 47824
 ```
 
-**暴露公网前务必设置访问 Token**，否则任何拿到链接的人都能操作看板：
+**暴露公网前务必有访问 Token**，否则任何拿到链接的人都能操作看板。看板会自动管理：「开始分享」时若还没有 Token 会自动生成一个，「重新生成」会同时换新域名和新 Token（旧链接立即失效，等于吊销）。也可以用环境变量指定固定 Token（优先级高于自动生成的值，设了之后「重新生成」不再换 Token）：
 
 ```bash
 TASKBOARD_TOKEN=你的随机长字符串 npm start
@@ -134,7 +135,7 @@ taskctl serve                               # 等同于 npm start
 
 错误以 JSON 打到 stderr 且退出码非零：`CLAIM_CONFLICT`（认领冲突）、`VERSION_CONFLICT`（版本过期）、`INVALID_TRANSITION`（非法状态跳转）。
 
-项目可配置多个本地仓库路径（看板 ⚙ 设置页 → 项目 → 编辑，或 `project-update`，逗号分隔），这些路径合起来是 Agent 的默认查找范围（提示性质，不作沙箱限制）。每个项目还有一个**主目录**（可配置，默认自动创建 `~/<项目名>`），是 Agent 执行时的工作目录。任务验收进 `done` 时，看板会把任务摘要（标题、需求、Agent 结果、验收意见）按固定结构追加到主目录 `.taskpin/` 下的 `TASKBOARD_MEMORY.md`（旧布局主目录根的 `TASKBOARD_MEMORY.md`/`TASKBOARD_RULES.md` 会在下次验收时自动迁入 `.taskpin/`），同一项目的记忆都汇总在这一个文件里；同时落库 `memories` 索引表供检索（`taskctl memory search`），超出最近 50 条的旧记忆折叠归档到 `.taskpin/TASKBOARD_MEMORY.archive.md`。看板顶栏的项目下拉支持「全部项目」视图（默认），任务卡片以徽章标注所属项目；新建任务时可在弹窗中选择项目。
+项目可配置多个本地仓库路径（看板 ⚙ 设置页 → 项目 → 编辑，或 `project-update`，逗号分隔），这些路径合起来是 Agent 的默认查找范围（提示性质，不作沙箱限制）。每个项目还有一个**主目录**（可配置，默认自动创建 `~/<项目名>`），是 Agent 执行时的工作目录。任务验收进 `done` 时，看板会把任务摘要（标题、需求、Agent 结果、验收意见）按固定结构追加到主目录 `.taskpin/` 下的 `TASKBOARD_MEMORY.md`（旧布局主目录根的 `TASKBOARD_MEMORY.md`/`TASKBOARD_RULES.md` 会在下次验收时自动迁入 `.taskpin/`），同一项目的记忆都汇总在这一个文件里；同时落库 `memories` 索引表供检索（`taskctl memory search`），超出最近 50 条的旧记忆折叠归档到 `.taskpin/TASKBOARD_MEMORY.archive.md`。看板顶栏的项目筛选是多选面板（checkbox 多选，「全部项目」为默认空选择），任务卡片以徽章标注所属项目；新建任务时可在弹窗中选择项目。
 
 ## 接入 Agent（Codex / Kimi / Reasonix / DSH）
 
@@ -157,7 +158,7 @@ cp -r skills/manage-taskboard ~/.codex/skills/
 | `PORT` | `47824` | 监听端口 |
 | `HOST` | `127.0.0.1` | 监听地址（`0.0.0.0` 可局域网直连，注意 Token 绕过风险） |
 | `TASKBOARD_DB` | `~/.codex-task-dashiboard/taskboard.sqlite` | SQLite 数据文件 |
-| `TASKBOARD_TOKEN` | （空） | 访问 Token；暴露公网前必须设置，本机 Host 访问免校验 |
+| `TASKBOARD_TOKEN` | （空） | 访问 Token；不设则由隧道自动生成（「重新生成」时换新），设了则优先且不再自动轮换，本机 Host 访问免校验 |
 | `REASONIX_HOME` | `~/.reasonix` | Reasonix 会话文件定位（续跑用） |
 
 ## Windows 常见问题
@@ -193,11 +194,11 @@ cp -r skills/manage-taskboard ~/.codex/skills/
   ```
 - 重启看板服务。
 
-### 3. 分享弹窗没有 Token / Token 显示「未设置 TASKBOARD_TOKEN」
+### 3. 分享弹窗 Token 显示「（未设置）」
 
 **现象**：公网分享弹窗里「访问 Token」为空。  
-**原因**：`TASKBOARD_TOKEN` 环境变量未设置。  
-**解决**：启动服务时带上 Token：
+**原因**：隧道尚未启动（Token 在「开始分享」时自动生成），或设置了空的 `TASKBOARD_TOKEN` 环境变量。  
+**解决**：点「开始分享」即可自动生成；想换 Token 点「重新生成」（旧链接立即失效）。也可以用环境变量指定固定 Token（优先级更高，设了之后「重新生成」不再换 Token）：
 
 ```bash
 # Git Bash
@@ -224,7 +225,7 @@ node server/index.mjs
 | --- | --- | --- |
 | GET | `/api/projects` / POST 同路径 | 项目列表 / 新建项目 |
 | PATCH/DELETE | `/api/projects/:id` | 编辑项目（名称、路径列表、主目录）/ 删除项目（仅限没有未取消任务，任务与评论级联删除） |
-| GET | `/api/tasks?project_id=&status=&include_canceled=1` | 任务列表 |
+| GET | `/api/tasks?project_id=&status=&include_canceled=1` | 任务列表（`project_id` 支持逗号分隔多选，如 `1,2,3`） |
 | POST | `/api/tasks` | 新建任务（只能落 `backlog`/`todo`） |
 | GET/PATCH/DELETE | `/api/tasks/:id` | 详情（含评论）/ 更新（乐观锁 `version`）/ 删除（仅已取消） |
 | POST | `/api/tasks/batch-delete {ids}` | 批量删除（事务） |

@@ -13,7 +13,10 @@
 <body>
   <header id="topbar">
     <div class="brand"><img class="brand-icon" src="/icon.svg" alt=""> Taskpin</div>
-    <select id="project-select" aria-label="选择项目"></select>
+    <div id="project-select">
+      <button id="project-select-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="选择项目（可多选）"></button>
+      <div id="project-select-panel" class="hidden"></div>
+    </div>
     <button id="quota-btn" class="btn ghost" title="额度（DeepSeek / Kimi / Codex）">💰</button>
     <button id="share-btn" class="btn ghost hidden" title="公网分享">🌐</button>
     <button id="settings-btn" class="btn ghost" title="设置">⚙</button>
@@ -76,13 +79,6 @@
       <textarea id="auto-claim-prompt" class="prompt-tpl" rows="14" readonly spellcheck="false"></textarea>
       <div class="prompt-actions">
         <button class="btn primary" id="auto-claim-copy">复制提示词</button>
-      </div>
-    </section>
-    <section class="settings-block">
-      <h2>访问 Token</h2>
-      <div class="token-row">
-        <code id="token-view">（未设置）</code>
-        <button id="token-btn" class="btn ghost">修改</button>
       </div>
     </section>
   </main>
@@ -157,7 +153,7 @@
   <div id="share-backdrop" class="hidden">
     <div class="dlg share-dlg" role="dialog" aria-modal="true">
       <h2>分享访问</h2>
-      <p class="settings-hint">外网通过 cloudflared 快速隧道暴露；同一局域网也可直接通过局域网地址访问。链接/Token 拿到的人即可操作看板，注意保密。</p>
+      <p class="settings-hint">外网通过 cloudflared 快速隧道暴露；同一局域网也可直接通过局域网地址访问。链接/Token 拿到的人即可操作看板，注意保密。「重新生成」会同时换新域名和新 Token，旧链接立即失效。</p>
       <div id="share-status" class="settings-hint"></div>
       <label class="share-label">外网地址</label>
       <code id="share-url" class="share-value"></code>
