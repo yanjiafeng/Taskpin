@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   openDb, ensureDefaultProject, listProjects, createProject, updateProject, resolveMainDir,
   listTasks, getTask, getTaskWithComments, createTask, claimTask, updateTask, addComment, setTaskLastRun, setTaskUsage, setTaskExecOpts,
-  normalizeTags, recentMemories, searchMemories, archiveProjectMemories, DbError,
+  normalizeTags, recentMemories, searchMemories, archiveProjectMemories,
+  mergeTasks, confirmMerge, cancelMerge, DbError,
 } from '../server/db.mjs';
 import { parseUsage } from '../server/runner.mjs';
 
@@ -464,4 +465,95 @@ test('parseUsage：codex / reasonix 输出解析，kimi 与无用量输出返回
   // kimi -p 不输出用量
   assert.equal(parseUsage('kimi', '好了\n\nTo resume this session: kimi -r session_x'), null);
   assert.equal(parseUsage('kimi', ''), null);
+});
+
+test('mergeTasks：校验（数量/同项目/状态）+ 建 backlog 草案（merged_from 记录 version，优先级取最高、标签取并集）', () => {
+  const db = freshDb();
+  const p = ensureDefaultProject(db);
+  // done 会写项目记忆，主目录隔离到临时目录
+  updateProject(db, p.id, { mainDir: mkdtempSync(join(tmpdir(), 'tb-merge-')) });
+  const p2 = createProject(db, { name: 'other' });
+  const mk = (opts = {}) => createTask(db, { projectId: p.id, title: 't', ...opts });
+  const a = updateTask(db, mk({ title: 'A', priority: 'high' }).id, { version: 1, tags: ['前端'] });
+  const b = updateTask(db, mk({ title: 'B' }).id, { version: 1, tags: ['前端', '紧急'] });
+
+  // 数量：1 个 / 6 个都拒绝
+  assert.throws(() => mergeTasks(db, [a.id]), (e) => e.code === 'VALIDATION');
+  assert.throws(() => mergeTasks(db, [1, 2, 3, 4, 5, 6].map(() => mk().id)), (e) => e.code === 'VALIDATION');
+  // 非整数 / 不存在
+  assert.throws(() => mergeTasks(db, [a.id, 'x']), (e) => e.code === 'VALIDATION');
+  assert.throws(() => mergeTasks(db, [a.id, 999]), (e) => e.code === 'NOT_FOUND');
+  // 跨项目拒绝
+  const other = createTask(db, { projectId: p2.id, title: 'X' });
+  assert.throws(() => mergeTasks(db, [a.id, other.id]), (e) => e.code === 'VALIDATION');
+  // 已取消 / 进行中拒绝
+  const canceled = updateTask(db, mk().id, { version: 1, status: 'canceled' });
+  assert.throws(() => mergeTasks(db, [a.id, canceled.id]), (e) => e.code === 'INVALID_TRANSITION');
+  const running = claimTask(db, mk().id);
+  assert.throws(() => mergeTasks(db, [a.id, running.id]), (e) => e.code === 'INVALID_TRANSITION');
+  // 校验失败整体回滚：不产生草案
+  assert.equal(listTasks(db).filter((t) => t.merged_from).length, 0);
+
+  // done / in_review / blocked / backlog 也可参与
+  let doneT = mk();
+  claimTask(db, doneT.id);
+  doneT = getTask(db, doneT.id);
+  updateTask(db, doneT.id, { version: doneT.version, status: 'in_review' });
+  doneT = getTask(db, doneT.id);
+  const done = updateTask(db, doneT.id, { version: doneT.version, status: 'done' }, { by: 'user' });
+  const draft = mergeTasks(db, [a.id, b.id, done.id]);
+  assert.equal(draft.status, 'backlog');
+  assert.equal(draft.priority, 'high'); // 取最高
+  assert.deepEqual(JSON.parse(draft.tags), ['前端', '紧急']); // 并集去重
+  const mf = JSON.parse(draft.merged_from);
+  assert.deepEqual(mf, [{ id: a.id, version: a.version }, { id: b.id, version: b.version }, { id: done.id, version: done.version }]);
+  // 源任务保持原状 + 互链评论；草案有来源评论
+  assert.equal(getTask(db, a.id).status, a.status);
+  assert.ok(getTaskWithComments(db, a.id).comments.some((c) => c.body.includes(`融合草案 #${draft.id}`)));
+  assert.ok(getTaskWithComments(db, draft.id).comments.some((c) => c.body.includes(`#${a.id}`)));
+});
+
+test('confirmMerge：生效置源任务已取消并互链；源任务 version 变了报 409 过期', () => {
+  const db = freshDb();
+  const p = ensureDefaultProject(db);
+  const a = createTask(db, { projectId: p.id, title: 'A' });
+  const b = createTask(db, { projectId: p.id, title: 'B' });
+  const draft = mergeTasks(db, [a.id, b.id]);
+
+  // 非草案 / 不存在
+  assert.throws(() => confirmMerge(db, a.id), (e) => e.code === 'VALIDATION');
+  assert.throws(() => confirmMerge(db, 999), (e) => e.code === 'NOT_FOUND');
+
+  // 源任务被改动 → 草案过期 409，且不产生任何取消
+  updateTask(db, a.id, { version: a.version, title: 'A2' });
+  assert.throws(() => confirmMerge(db, draft.id), (e) => e.code === 'VERSION_CONFLICT');
+  assert.equal(getTask(db, b.id).status, 'todo');
+
+  // 重新合并（version 刷新）后确认生效
+  const draft2 = mergeTasks(db, [a.id, b.id]);
+  const after = confirmMerge(db, draft2.id);
+  assert.equal(getTask(db, a.id).status, 'canceled');
+  assert.equal(getTask(db, b.id).status, 'canceled');
+  assert.ok(getTaskWithComments(db, a.id).comments.some((c) => c.body.includes(`已合并进 #${draft2.id}`)));
+  assert.ok(after.merged_from == null); // 生效后清掉，确认按钮据此消失
+  // 二次确认拒绝
+  assert.throws(() => confirmMerge(db, draft2.id), (e) => e.code === 'VALIDATION');
+});
+
+test('cancelMerge：放弃——草案取消、merged_from 清除、源任务不受影响', () => {
+  const db = freshDb();
+  const p = ensureDefaultProject(db);
+  const a = createTask(db, { projectId: p.id, title: 'A' });
+  const b = createTask(db, { projectId: p.id, title: 'B' });
+  const draft = mergeTasks(db, [a.id, b.id]);
+  const after = cancelMerge(db, draft.id);
+  assert.equal(after.status, 'canceled');
+  assert.ok(after.merged_from == null);
+  assert.equal(getTask(db, a.id).status, 'todo');
+  assert.equal(getTask(db, b.id).status, 'todo');
+  assert.ok(getTaskWithComments(db, a.id).comments.some((c) => c.body.includes('已放弃')));
+  // 已取消的草案不能再次放弃
+  assert.throws(() => cancelMerge(db, draft.id), (e) => e.code === 'VALIDATION');
+  // 非草案拒绝
+  assert.throws(() => cancelMerge(db, a.id), (e) => e.code === 'VALIDATION');
 });

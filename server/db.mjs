@@ -115,6 +115,10 @@ export function openDb(dbPath = defaultDbPath()) {
   if (!taskCols.includes('tags')) {
     db.exec("ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'");
   }
+  // 迁移：融合草案的源任务清单（JSON [{id, version}]；NULL = 非融合草案；确认/放弃后清回 NULL）
+  if (!taskCols.includes('merged_from')) {
+    db.exec('ALTER TABLE tasks ADD COLUMN merged_from TEXT');
+  }
   return db;
 }
 
@@ -341,9 +345,9 @@ export const AGENT_NAMES = ['codex', 'kimi', 'reasonix', 'dsh'];
 // prompt_new/prompt_resume/prompt_qa：执行/问答 prompt 模板覆盖（null = 用 runner.mjs 的 PROMPT_DEFAULTS）
 // tunnel_url：最近一次 cloudflared 隧道域名（隧道断开后展示用，由 tunnel.mjs 写入）
 // access_token：访问 Token（null = 未设置；设置页可随机生成，改完即时生效；TASKBOARD_TOKEN 环境变量优先于它）
-const SETTING_DEFAULTS = () => ({ agents: [...AGENT_NAMES], prompt_new: null, prompt_resume: null, prompt_qa: null, tunnel_url: null, access_token: null });
+const SETTING_DEFAULTS = () => ({ agents: [...AGENT_NAMES], prompt_new: null, prompt_resume: null, prompt_qa: null, prompt_merge: null, tunnel_url: null, access_token: null });
 const SETTING_KEYS = Object.keys(SETTING_DEFAULTS());
-const PROMPT_KEYS = ['prompt_new', 'prompt_resume', 'prompt_qa'];
+const PROMPT_KEYS = ['prompt_new', 'prompt_resume', 'prompt_qa', 'prompt_merge'];
 
 // 全局设置（key-value，value 存 JSON）：agents = 启用的执行 Agent；prompt_* = 执行 prompt 模板覆盖
 export function getSettings(db) {
@@ -553,6 +557,126 @@ export function deleteTasks(db, ids) {
     throw err;
   }
   return { deleted: ids.length };
+}
+
+// ---------- 任务合并融合（两段式：草案 → 确认/放弃） ----------
+
+// 合并数量限制与可参与状态：除已取消（终态）与进行中（有活跃执行进程）外都可以
+export const MERGE_MIN = 2;
+export const MERGE_MAX = 5;
+export const MERGEABLE_STATUSES = ['backlog', 'todo', 'blocked', 'in_review', 'done'];
+
+function parseMergedFrom(task) {
+  try { return task.merged_from ? JSON.parse(task.merged_from) : null; } catch { return null; }
+}
+
+// 第一步（出草案）：校验源任务（2~5 个、同项目、状态可合并），创建 backlog 状态的融合草案任务。
+// 草案的 merged_from 记录各源任务当时的 version（确认时据此检测草案过期）；优先级取最高、标签取并集（≤8）。
+// 源任务在确认前保持原状，各写一条互链评论。
+export function mergeTasks(db, ids) {
+  if (!Array.isArray(ids) || !ids.every(Number.isInteger)) {
+    throw new DbError('VALIDATION', 'ids 必须是整数数组');
+  }
+  const uniq = [...new Set(ids)];
+  if (uniq.length < MERGE_MIN || uniq.length > MERGE_MAX) {
+    throw new DbError('VALIDATION', `合并任务数为 ${MERGE_MIN}~${MERGE_MAX} 个（收到 ${uniq.length} 个）`);
+  }
+  db.exec('BEGIN');
+  try {
+    const sources = uniq.map((id) => getTask(db, id));
+    const pid = sources[0].project_id;
+    if (sources.some((t) => t.project_id !== pid)) {
+      throw new DbError('VALIDATION', '只能合并同一项目下的任务');
+    }
+    for (const t of sources) {
+      if (!MERGEABLE_STATUSES.includes(t.status)) {
+        throw new DbError('INVALID_TRANSITION', `任务 #${t.id} 是「${t.status}」，已取消/进行中的任务不能参与合并`, { current: t });
+      }
+    }
+    const priority = PRIORITIES[Math.max(...sources.map((t) => PRIORITIES.indexOf(t.priority)))];
+    const tags = [...new Set(sources.flatMap((t) => { try { return JSON.parse(t.tags || '[]'); } catch { return []; } }))].slice(0, 8);
+    const title = `融合：${sources.map((t) => `#${t.id}`).join('、')} 的需求`;
+    const description = [
+      '（融合草案：等待融合执行把来源任务融合重写本描述；确认合并后来源任务才会取消）',
+      '',
+      '## 来源任务',
+      ...sources.map((t) => `- #${t.id} ${t.title}（${t.status}）`),
+    ].join('\n');
+    const mergedFrom = JSON.stringify(sources.map((t) => ({ id: t.id, version: t.version })));
+    const ts = now();
+    const r = db.prepare(
+      "INSERT INTO tasks (project_id, title, description, status, priority, version, tags, merged_from, created_at, updated_at) VALUES (?, ?, ?, 'backlog', ?, 1, ?, ?, ?, ?)"
+    ).run(pid, title, description, priority, JSON.stringify(tags), mergedFrom, ts, ts);
+    const draftId = Number(r.lastInsertRowid);
+    for (const t of sources) {
+      addComment(db, t.id, { author: 'user', body: `已创建融合草案 #${draftId}（与本任务一同合并融合）；你确认草案后本任务才会取消，此前保持原状` });
+    }
+    addComment(db, draftId, {
+      author: 'user',
+      body: `由 ${sources.map((t) => `#${t.id}`).join(' ')} 合并而来。确认合并后源任务将全部取消；放弃则删除本草稿，源任务不受影响。`,
+    });
+    db.exec('COMMIT');
+    return getTask(db, draftId);
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+// 第二步（确认生效）：校验各源任务 version 未变（变了 = 草案过期，409 提示重新融合），
+// 同事务把源任务全部置已取消并互链评论，草案的 merged_from 清回 NULL（溯源留在评论与描述里）。
+export function confirmMerge(db, draftId) {
+  const draft = getTask(db, draftId);
+  const mf = parseMergedFrom(draft);
+  if (!mf) throw new DbError('VALIDATION', `任务 #${draftId} 不是待确认的融合草案`);
+  db.exec('BEGIN');
+  try {
+    for (const { id, version } of mf) {
+      const t = getTask(db, id);
+      if (t.version !== version) {
+        throw new DbError('VERSION_CONFLICT', `任务 #${id} 在草案生成后又有改动，草案已过期，请重新融合`, { current: t });
+      }
+      if (!MERGEABLE_STATUSES.includes(t.status)) {
+        throw new DbError('INVALID_TRANSITION', `任务 #${id} 当前是「${t.status}」，不能取消并入合并`, { current: t });
+      }
+    }
+    for (const { id } of mf) {
+      const t = getTask(db, id);
+      updateTask(db, id, { version: t.version, status: 'canceled' });
+      addComment(db, id, { author: 'user', body: `已合并进 #${draftId}（融合草案确认生效）` });
+    }
+    db.prepare('UPDATE tasks SET merged_from = NULL WHERE id = ?').run(draftId);
+    addComment(db, draftId, { author: 'user', body: `合并已生效：源任务 ${mf.map((s) => `#${s.id}`).join(' ')} 已取消` });
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return getTask(db, draftId);
+}
+
+// 第二步（放弃）：草案置已取消并清掉 merged_from，源任务不受影响（各留一条说明评论）。
+export function cancelMerge(db, draftId) {
+  const draft = getTask(db, draftId);
+  const mf = parseMergedFrom(draft);
+  if (!mf) throw new DbError('VALIDATION', `任务 #${draftId} 不是待确认的融合草案`);
+  if (draft.status === 'canceled') {
+    throw new DbError('INVALID_TRANSITION', `任务 #${draftId} 已是已取消状态`, { current: draft });
+  }
+  db.exec('BEGIN');
+  try {
+    updateTask(db, draftId, { version: draft.version, status: 'canceled' });
+    db.prepare('UPDATE tasks SET merged_from = NULL WHERE id = ?').run(draftId);
+    addComment(db, draftId, { author: 'user', body: '合并已放弃：本草案取消，源任务不受影响' });
+    for (const { id } of mf) {
+      try { addComment(db, id, { author: 'user', body: `融合草案 #${draftId} 已放弃，本任务保持原状` }); } catch { /* 源任务可能已被删除 */ }
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return getTask(db, draftId);
 }
 
 // ---------- comments ----------

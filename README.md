@@ -29,6 +29,7 @@
 - **异常退出告警**：Agent 进程非零退出的任务卡片标红（⚠ 异常退出角标），下次执行或正常结束自动消除
 - **额度一览**：顶栏 💰 展开可隐藏的额度区——DeepSeek 钱包余额、Kimi 周额度/5h 窗口/Extra Usage、Codex 计费（OpenAI 标准接口，第三方中转站可能不支持）；全部走元数据接口、不消耗模型 token，60s 缓存
 - **问答模式**：执行前的需求澄清——Agent 只讨论不实现，通过评论来回问答，把需求/规则/验收标准写回任务描述；待规划/待办/阻塞可发起
+- **合并融合**：顶栏 ☑ 进入多选，勾选 2~5 个任务（已取消/进行中除外）点「合并融合」——Agent 把多个相关任务融合成一个新需求（统一表述 + 融合说明 + 逐条保留的验收标准），两段式确认：先出草案（原任务不动），你在草案详情确认后原任务才取消，可放弃
 - **验收标准前置**：开发类任务没有「验收标准」时 Agent 不动手，给草案并进阻塞问你；交付时对照标准逐条自验证
 - **开工确认**：开发类任务只有用户明确说了「开工」（描述或评论）才开始实现；没说时 Agent 给实现计划发 `[提问]` 并置「阻塞」，答复「开工」自动续跑动工
 - **会话续跑**：打回重做时恢复原 CLI 会话（`codex exec resume` / `kimi -S` / `reasonix run --resume`），Agent 记得上轮细节；DSH 的 headless 模式不支持续跑（每次新会话），跨 Agent 同样靠评论继承记忆
@@ -40,7 +41,7 @@
 - **任务标签**：任务可挂多个标签（明细抽屉维护，≤8 个/单个 ≤20 字符），卡片标题下方以胶带风胶囊展示
 - **多项目**：每个项目可配多个仓库路径（查找范围）和一个主目录（工作目录）；顶栏项目筛选支持多选（checkbox 面板，选中态本地持久化），「全部项目」总览视图
 - **手机可用**：移动端纵向手风琴布局 + 按钮操作，不依赖拖拽；内置 cloudflared 隧道管理，一键把看板暴露到公网
-- **自定义提示词**：执行（新会话/续跑）和问答三个模板都可在设置页查看、修改、恢复默认
+- **自定义提示词**：执行（新会话/续跑）、问答、融合四个模板都可在设置页查看、修改、恢复默认
 - **亮暗双主题**，SSE 实时刷新（`taskctl` CLI 直写 SQLite 也会经数据库文件监听触发广播），乐观锁防并发冲突，原子认领防重复执行；对话框点外部不关闭，操作按钮带 loading 防重复点击
 
 <img src="docs/screenshot-settings.png" width="60%" alt="设置页：项目、Agent 开关、提示词模板">
@@ -129,6 +130,9 @@ taskctl comment 3 --body "看截图" --image a.png --image b.jpg   # --image 可
 taskctl update 3 --status in_review --if-version 2
 taskctl update 3 --tags "前端,紧急" --if-version 2    # 标签（逗号分隔；--tags "" 清空）
 taskctl done 3 --if-version 3               # 仅用户：验收
+taskctl merge --ids 3,4,5                   # 合并融合第一步：建 backlog 融合草案（融合执行需在看板 UI 发起）
+taskctl merge-confirm 6                     # 第二步：确认生效（源任务 version 变了会报 409 过期）
+taskctl merge-cancel 6                      # 第二步：放弃（草案取消，源任务不动）
 taskctl memory search 登录 --project 1      # 检索项目记忆（BM25 + 时间衰减；--project 不传搜全部）
 taskctl serve                               # 等同于 npm start
 ```
@@ -229,10 +233,13 @@ node server/index.mjs
 | POST | `/api/tasks` | 新建任务（只能落 `backlog`/`todo`） |
 | GET/PATCH/DELETE | `/api/tasks/:id` | 详情（含评论）/ 更新（乐观锁 `version`）/ 删除（仅已取消） |
 | POST | `/api/tasks/batch-delete {ids}` | 批量删除（事务） |
+| POST | `/api/tasks/merge {ids, agent?}` | 合并融合第一步：校验（2~5 个、同项目、非已取消/进行中）建 backlog 融合草案（`merged_from` 记录源任务 id+version），自动以 merge 模式发起融合执行（启动失败不阻断，响应带 `run_error`） |
+| POST | `/api/tasks/:id/merge-confirm` | 第二步确认生效：源任务 version 未变（变了 409 过期）→ 同事务全部置已取消 + 互链评论，草案 `merged_from` 清空 |
+| POST | `/api/tasks/:id/merge-cancel` | 第二步放弃：草案置已取消，源任务不受影响 |
 | POST | `/api/tasks/:id/claim` | 原子认领 |
 | POST | `/api/tasks/:id/comments` | 评论（`author: user\|agent`，`images` 可附图片 dataURL 数组） |
 | GET | `/api/attachments/:taskId/:file` | 评论图片附件 |
-| POST | `/api/tasks/:id/execute` | 拉起 Agent（`agent, mode?: execute\|qa, model?, effort?, permission?`；qa 仅待规划/待办/阻塞） |
+| POST | `/api/tasks/:id/execute` | 拉起 Agent（`agent, mode?: execute\|qa\|merge, model?, effort?, permission?`；qa/merge 仅待规划/待办/阻塞，merge 仅融合草案） |
 | GET | `/api/runs` · DELETE `/api/tasks/:id/run` | 运行列表 / 停止执行 |
 | GET | `/api/tasks/:id/run/output` | 运行中任务的实时输出（未在运行返回 404） |
 | GET | `/api/agent-options` | 各 Agent 可选的模型/思考/权限（执行面板联动选项；模型读各家 CLI 本地配置） |

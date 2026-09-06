@@ -262,6 +262,32 @@ export const PROMPT_DEFAULTS = {
     "5. {{tctl}} comment {{task_id}} --author agent --body '<问答结论摘要>'",
     '6. 流转任务：未成熟回 backlog，已就绪进 todo，阻塞已解进 todo（{{tctl}} update --status backlog|todo --if-version <当前 version>）。禁止置 in_progress / in_review / done',
   ].join('\n'),
+  // 融合模式（merge）：把多个源任务「合并+融合」成草案任务 #{{task_id}}。
+  // 类似 qa 不自动流转状态、不实现需求本身，只产出融合后的描述；确认/放弃由用户在草案详情点按钮。
+  merge: [
+    '你是看板任务融合 Agent，负责把多个源任务「合并+融合」成草案任务 #{{task_id}}。看板 CLI：{{tctl}}',
+    '',
+    '项目「{{project_name}}」配置的查找范围（优先在这些路径下定位仓库，但不限于这些路径）：',
+    '{{scope}}',
+    '',
+    '源任务：{{sources}}',
+    '',
+    '严格按以下流程执行：',
+    '1. 若当前工作目录存在 .taskpin/TASKBOARD_RULES.md，先通读它；项目记忆见下方「项目记忆」节，需要更多历史细节时用 {{tctl}} memory search 检索',
+    '2. {{tctl}} show {{task_id}} 读草案，再逐个 {{tctl}} show <源任务id> 完整阅读描述与全部评论（含调研结论与验收标准；images 字段是图片绝对路径，需要时用读图工具查看）',
+    '3. 融合（不是拼接）：识别源任务间相同的部分、或都涉及修改同一功能的部分，统一成一个大需求；进一步融合它们的修改方案——去重、统一口径、发现方案矛盾并给出取舍（取舍必须写理由）',
+    '4. 无法融合（诉求互相冲突且无取舍依据）时：不要强行合并——comment（body 以 [提问] 开头，列出冲突点与可选方案）后 update --status blocked，等用户裁决',
+    "5. 融合成功：{{tctl}} update {{task_id}} --if-version <当前 version> --desc '<重写后的描述>'，结构必须包含：",
+    '   ## 需求 / ## 目标 —— 融合后的统一表述，不是源任务的罗列',
+    '   ## 来源任务 —— 列出全部源任务编号与各自一句话核心诉求（保留溯源）',
+    '   ## 融合说明 —— 哪些部分被合并去重、哪些方案有矛盾、取了哪个舍了哪个、理由（用户据此验收融合质量）',
+    '   ## 验收标准 —— 各源任务的验收标准逐条保留（标注来自哪个任务），外加融合后的整体标准；一条都不许丢',
+    "6. {{tctl}} comment {{task_id}} --author agent --body '<融合摘要：融合思路、主要取舍、遗留疑点>'",
+    '7. {{tctl}} update {{task_id}} --status todo --if-version <当前 version>',
+    '',
+    '不要修改任何源任务（它们保持原状，用户在草案详情确认合并后才自动取消）。不要实现需求本身——你只负责融合出方案描述。',
+    '禁止将任务置为 in_progress / in_review / done。',
+  ].join('\n'),
 };
 
 // 自动认领提示词：复制贴给常驻 Agent 会话（终端里的 codex/kimi/reasonix），
@@ -313,19 +339,23 @@ export function buildMemorySection(db, projectId, task) {
 
 function buildPrompt(task, projectPaths, { resume, mode, templates, agent, memorySection } = {}) {
   const tctl = `node ${TASKCTL}`;
-  const kind = mode === 'qa' ? 'qa' : resume ? 'resume' : 'new';
+  const kind = mode === 'qa' ? 'qa' : mode === 'merge' ? 'merge' : resume ? 'resume' : 'new';
   const tpl = templates?.[kind]?.trim() ? templates[kind] : PROMPT_DEFAULTS[kind];
   // 执行开始时看板已把任务流转到「进行中」（自动认领），无需 agent 再 claim
   const claimStep = `3. 任务已由看板自动认领进「进行中」，无需执行 claim，直接开始实现；若是打回重做，重点按最新评论中的验收意见修改`;
   const scope = projectPaths.length
     ? projectPaths.map((p) => `  - ${p}`).join('\n')
     : '  （未配置，先自行定位代码仓库）';
+  // 融合模式：从草案的 merged_from（JSON [{id, version}]）取源任务 id 列表
+  let sourceIds = [];
+  try { sourceIds = (JSON.parse(task.merged_from || 'null') || []).map((s) => s.id); } catch { /* 非融合草案 */ }
   const prompt = renderTemplate(tpl, {
     task_id: String(task.id),
     tctl,
     project_name: task.project_name ?? '',
     scope,
     claim_step: claimStep,
+    sources: sourceIds.length ? sourceIds.map((id) => `#${id}`).join(' ') : '（未记录，读草案描述里的「来源任务」）',
   });
   const withMemory = memorySection ? `${prompt}\n\n${memorySection}` : prompt;
   // dsh 沙箱内 taskctl 直写看板数据库会被权限拦截；dsh-taskpin 插件工具走 HTTP 不受限
@@ -358,10 +388,10 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     if (!AGENT_NAMES.includes(agent)) {
       throw new DbError('VALIDATION', `unknown agent: ${agent} (${AGENT_NAMES.join('|')})`);
     }
-    // execMode：execute=实现任务（执行即进进行中）；qa=问答（只讨论不实现，不自动流转状态）
+    // execMode：execute=实现任务（执行即进进行中）；qa=问答、merge=融合（只讨论/重写描述，不自动流转状态）
     const execMode = options.mode ?? 'execute';
-    if (!['execute', 'qa'].includes(execMode)) {
-      throw new DbError('VALIDATION', `unknown mode: ${execMode} (execute|qa)`);
+    if (!['execute', 'qa', 'merge'].includes(execMode)) {
+      throw new DbError('VALIDATION', `unknown mode: ${execMode} (execute|qa|merge)`);
     }
     const settings = getSettings(db);
     if (!settings.agents.includes(agent)) {
@@ -374,10 +404,14 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     if (task.status === 'done' || task.status === 'canceled') {
       throw new DbError('INVALID_TRANSITION', `task ${taskId} is ${task.status}`);
     }
-    if (execMode === 'qa') {
-      // 问答只允许在 待规划/待办/阻塞 发起；状态保持不动（不占「进行中」）
+    if (execMode === 'qa' || execMode === 'merge') {
+      // 问答/融合只允许在 待规划/待办/阻塞 发起；状态保持不动（不占「进行中」）
       if (!['backlog', 'todo', 'blocked'].includes(task.status)) {
-        throw new DbError('INVALID_TRANSITION', `task ${taskId} is ${task.status}；问答仅支持待规划/待办/阻塞`, { current: task });
+        throw new DbError('INVALID_TRANSITION', `task ${taskId} is ${task.status}；问答/融合仅支持待规划/待办/阻塞`, { current: task });
+      }
+      // 融合模式校验草案身份：必须有 merged_from 源任务清单
+      if (execMode === 'merge' && !task.merged_from) {
+        throw new DbError('VALIDATION', `task ${taskId} 不是融合草案（无 merged_from）`, { current: task });
       }
     } else {
       // 执行即进「进行中」：卡片位置同步反映后台执行。backlog 先排进 todo，todo 原子认领，
@@ -412,7 +446,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
         resume: Boolean(resumeId),
         mode: execMode,
         agent,
-        templates: { new: settings.prompt_new, resume: settings.prompt_resume, qa: settings.prompt_qa }, // 设置页的覆盖模板
+        templates: { new: settings.prompt_new, resume: settings.prompt_resume, qa: settings.prompt_qa, merge: settings.prompt_merge }, // 设置页的覆盖模板
         memorySection: buildMemorySection(db, task.project_id, task),
       });
       const { cmd, args, env } = buildCommand(agent, prompt, cwd, dbDir, { ...options, resumeId });
@@ -428,7 +462,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
       } catch { /* 任务可能已被删除 */ }
       throw err;
     }
-    const mode = [execMode === 'qa' ? '问答' : null, options.model, options.effort, options.permission, resumeId ? '续跑' : null].filter(Boolean).join(' · ');
+    const mode = [execMode === 'qa' ? '问答' : execMode === 'merge' ? '融合' : null, options.model, options.effort, options.permission, resumeId ? '续跑' : null].filter(Boolean).join(' · ');
     const run = { task_id: taskId, agent, mode, pid: proc.pid, started_at: new Date().toISOString(), proc, output: '', sessionId: null, stopping: false };
     runs.set(taskId, run);
     // 新执行开始：清除上一次的异常退出标记

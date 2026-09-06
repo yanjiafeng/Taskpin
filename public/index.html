@@ -17,6 +17,7 @@
       <button id="project-select-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="选择项目（可多选）"></button>
       <div id="project-select-panel" class="hidden"></div>
     </div>
+    <button id="select-btn" class="btn ghost" title="多选任务：勾选 2~5 个后可合并融合">☑</button>
     <button id="quota-btn" class="btn ghost" title="额度（DeepSeek / Kimi / Codex）">💰</button>
     <button id="share-btn" class="btn ghost hidden" title="公网分享">🌐</button>
     <button id="settings-btn" class="btn ghost" title="设置">⚙</button>
@@ -33,6 +34,12 @@
   </section>
 
   <main id="board" aria-label="任务看板"></main>
+
+  <div id="batch-bar" class="hidden" role="toolbar" aria-label="多选操作">
+    <span id="batch-count">已选 0 个</span>
+    <button class="btn primary" id="batch-merge" title="把勾选的 2~5 个任务合并融合成一个新需求（先出草案，确认后原任务才取消）">🧬 合并融合</button>
+    <button class="btn ghost" id="batch-exit">退出多选</button>
+  </div>
 
   <main id="settings-page" class="hidden" aria-label="设置">
     <div class="settings-head">
@@ -68,6 +75,8 @@
       <textarea id="prompt-resume" class="prompt-tpl" rows="10" spellcheck="false"></textarea>
       <label class="prompt-label">问答模板（只讨论不实现；待规划/待办/阻塞可发起）</label>
       <textarea id="prompt-qa" class="prompt-tpl" rows="12" spellcheck="false"></textarea>
+      <label class="prompt-label">融合模板（合并融合的草案任务用；额外占位符 <code>{{sources}}</code> = 源任务编号列表）</label>
+      <textarea id="prompt-merge" class="prompt-tpl" rows="12" spellcheck="false"></textarea>
       <div class="prompt-actions">
         <button class="btn primary" id="prompt-save">保存模板</button>
         <button class="btn ghost" id="prompt-reset">恢复默认</button>

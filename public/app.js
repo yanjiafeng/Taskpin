@@ -91,7 +91,12 @@ const state = {
   openTaskId: null,
   openTask: null, // 抽屉中任务详情（含 version、comments）
   historyOpen: false, // 抽屉里「更早评论」折叠条的展开状态（SSE 重渲时保持；换任务时重置）
+  selectMode: false, // 多选模式（合并融合入口）：卡片显示勾选框，点卡片 = 勾选而非开抽屉
+  selected: new Set(), // 多选模式勾选的 taskId
 };
+
+// 可参与合并融合的任务状态（与 server/db.mjs 的 MERGEABLE_STATUSES 保持一致；已取消/进行中除外）
+const MERGEABLE_STATUSES = ['backlog', 'todo', 'blocked', 'in_review', 'done'];
 
 // ---------- Token 与 API ----------
 function getToken() { return localStorage.getItem('taskboard_token') || ''; }
@@ -405,14 +410,21 @@ function cardHtml(t) {
   }
   const runRow = (execTag || failBadge || runBtn)
     ? `<div class="c-run">${execTag}${failBadge}${runBtn}</div>` : '';
+  // 多选模式（合并融合）：可合并状态的卡片显示勾选框；已勾选的加选中态
+  const selectable = state.selectMode && MERGEABLE_STATUSES.includes(t.status);
+  const checked = selectable && state.selected.has(t.id);
+  // 融合草案标记（merged_from 非空 = 待确认的合并草案）
+  const draftPill = t.merged_from ? '<span class="pill merge-draft" title="融合草案：确认后源任务将取消">🧬 融合草案</span>' : '';
   return `
-    <div class="card${live ? ' running' : ''}${failBadge ? ' run-failed' : ''}" draggable="true" data-id="${t.id}" style="--rot:${cardTilt(t.id)}deg">
+    <div class="card${live ? ' running' : ''}${failBadge ? ' run-failed' : ''}${selectable ? ' selectable' : ''}${checked ? ' selected' : ''}" draggable="${state.selectMode ? 'false' : 'true'}" data-id="${t.id}" style="--rot:${cardTilt(t.id)}deg">
+      ${selectable ? `<span class="c-check" aria-hidden="true">${checked ? '✓' : ''}</span>` : ''}
       ${live ? '<span class="hang-tag">执行中</span>' : ''}
       ${orphan ? '<span class="orphan-tag" title="任务停在「进行中」但没有活跃执行进程（执行中断/失联），将自动收回「待规划」">⚠ 执行中断</span>' : ''}
       <div class="c-head"><span class="title" title="${esc(t.title)}">${esc(t.title)}</span></div>
       ${tagsRow}
       <div class="c-pills">
         <span class="pill">#${t.id}</span>
+        ${draftPill}
         ${projPill}
         <span class="pill prio-${esc(t.priority)}">● ${esc(PRIORITY_LABEL[t.priority] || t.priority)}</span>
         ${comments ? `<span class="pill">${comments}</span>` : ''}
@@ -459,7 +471,25 @@ function renderBoard() {
     });
   });
   board.querySelectorAll('.card').forEach((card) => {
-    card.onclick = () => openDrawer(Number(card.dataset.id));
+    card.onclick = () => {
+      const id = Number(card.dataset.id);
+      // 多选模式：点卡片 = 勾选/取消勾选（仅可合并状态可勾），不开抽屉
+      if (state.selectMode) {
+        const t = state.tasks.find((x) => x.id === id);
+        if (!t || !MERGEABLE_STATUSES.includes(t.status)) {
+          toast('「已取消」和「进行中」的任务不能参与合并融合');
+          return;
+        }
+        if (state.selected.has(id)) state.selected.delete(id);
+        else state.selected.add(id);
+        card.classList.toggle('selected', state.selected.has(id));
+        const chk = card.querySelector('.c-check');
+        if (chk) chk.textContent = state.selected.has(id) ? '✓' : '';
+        updateBatchBar();
+        return;
+      }
+      openDrawer(id);
+    };
     card.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('text/plain', card.dataset.id);
       e.dataTransfer.effectAllowed = 'move';
@@ -549,6 +579,51 @@ async function moveTask(task, target) {
     toast(err.message, 'error');
     scheduleReload();
   }
+}
+
+// ---------- 多选与合并融合 ----------
+// 多选模式开关：进入时禁止拖拽（cardHtml 里 draggable=false），退出时清空勾选
+function toggleSelectMode(on = !state.selectMode) {
+  state.selectMode = on;
+  if (!on) state.selected.clear();
+  $('#select-btn').classList.toggle('active', on);
+  renderBoard();
+  updateBatchBar();
+}
+
+function updateBatchBar() {
+  const bar = $('#batch-bar');
+  bar.classList.toggle('hidden', !state.selectMode);
+  if (!state.selectMode) return;
+  const n = state.selected.size;
+  $('#batch-count').textContent = `已选 ${n} 个`;
+  const btn = $('#batch-merge');
+  btn.disabled = n < 2 || n > 5;
+  btn.title = n < 2 || n > 5
+    ? '勾选 2~5 个任务后可合并融合'
+    : '合并融合成一个新需求：先出草案，确认后原任务才取消';
+}
+
+// 合并融合第一步：POST /api/tasks/merge 建草案 + 服务端自动发起融合执行；成功则退出多选并打开草案
+async function submitMerge(btn) {
+  const ids = [...state.selected].sort((a, b) => a - b);
+  if (ids.length < 2 || ids.length > 5) return toast('合并融合需要勾选 2~5 个任务', 'error');
+  await withLoading(btn, async () => {
+    try {
+      const res = await api('/api/tasks/merge', { method: 'POST', body: { ids } });
+      toggleSelectMode(false);
+      scheduleReload();
+      if (res.run_error) {
+        toast(`融合草案 #${res.task.id} 已创建，但融合执行未启动（${res.run_error}），可在草案详情手动执行`, 'error');
+      } else {
+        toast(`融合草案 #${res.task.id} 已创建，融合执行中`);
+      }
+      openDrawer(res.task.id);
+    } catch (err) {
+      toast(err.message, 'error');
+      scheduleReload();
+    }
+  });
 }
 
 // ---------- 详情抽屉 ----------
@@ -970,6 +1045,19 @@ function renderDrawer() {
   // 已取消任务的删除入口（替代原卡片上的 × 按钮）
   const delBtn = t.status === 'canceled'
     ? '<button class="btn danger" id="d-del">🗑 删除任务</button>' : '';
+  // 融合草案（merged_from 非空且未取消）：确认合并 / 放弃合并（两段式确认门的第二步）
+  let mergeDraftHtml = '';
+  try {
+    const mf = t.merged_from ? JSON.parse(t.merged_from) : null;
+    if (Array.isArray(mf) && mf.length && t.status !== 'canceled') {
+      mergeDraftHtml = `<div class="d-sec">合并融合</div>
+        <div class="settings-hint">本任务由 ${mf.map((s) => `#${s.id}`).join(' ')} 合并而来的草案。确认合并后源任务将全部取消（不可恢复）；放弃则本草稿取消，源任务不受影响。</div>
+        <div class="row status-actions">
+          <button class="btn primary" id="d-merge-confirm">✓ 确认合并</button>
+          <button class="btn ghost" id="d-merge-cancel">✕ 放弃合并</button>
+        </div>`;
+    }
+  } catch { /* merged_from 坏值忽略 */ }
   // 执行/停止入口（与卡片按钮同一套逻辑）：终态不显示；放在评论输入区，发布评论后顺手点。
   // 有 exec_opts 记忆（且 agent 仍启用）时用 split button（docs/demos/composer-actions.html 方案 C）：
   // 主区「▶ 执行 · agent」直接用上次参数拉起，▾ 展开「💬 问答 / ⚙ 更换工具/参数」；
@@ -1088,6 +1176,7 @@ function renderDrawer() {
         <div class="row status-actions">${moveBtns || '<span style="color:var(--text-dim)">终态，无可用操作</span>'}</div>
         ${acceptBtn}
         ${delBtn}
+        ${mergeDraftHtml}
         <div class="version-info">version ${t.version}${t.thread_id ? ` · thread ${esc(t.thread_id)}` : ''} · 更新于 ${esc(fmtLocal(t.updated_at))}</div>
         ${execLine ? `<div class="version-info">${esc(execLine)}</div>` : ''}
         <div class="version-info">${esc(contextLine)}</div>
@@ -1242,6 +1331,43 @@ function renderDrawer() {
   });
   // 抽屉内执行/停止：复用卡片的执行面板与停止接口
   $('#d-exec')?.addEventListener('click', () => openRunSheet(t.id));
+  // 融合草案：确认合并（源任务全部取消，不可恢复）/ 放弃合并（草案取消，源任务不动）
+  $('#d-merge-confirm')?.addEventListener('click', (e) => {
+    const btn = e.currentTarget;
+    confirmDlg('确认合并生效？源任务将全部置为「已取消」，此操作不可恢复', { okText: '确认合并', danger: true }).then((ok) => {
+      if (!ok) return;
+      withLoading(btn, async () => {
+        try {
+          await api(`/api/tasks/${t.id}/merge-confirm`, { method: 'POST' });
+          toast('合并已生效，源任务已取消');
+          scheduleReload();
+          closeDrawer();
+        } catch (err) {
+          toast(err.message, 'error');
+          scheduleReload();
+          refreshDrawer();
+        }
+      });
+    });
+  });
+  $('#d-merge-cancel')?.addEventListener('click', (e) => {
+    const btn = e.currentTarget;
+    confirmDlg('放弃这次合并？草案任务将取消，源任务不受影响', { okText: '放弃合并' }).then((ok) => {
+      if (!ok) return;
+      withLoading(btn, async () => {
+        try {
+          await api(`/api/tasks/${t.id}/merge-cancel`, { method: 'POST' });
+          toast('已放弃合并，源任务保持原状');
+          scheduleReload();
+          closeDrawer();
+        } catch (err) {
+          toast(err.message, 'error');
+          scheduleReload();
+          refreshDrawer();
+        }
+      });
+    });
+  });
   // 抽屉内删除（仅已取消任务显示）：替代原卡片 × 按钮
   $('#d-del')?.addEventListener('click', (e) => {
     const btn = e.currentTarget;
@@ -1394,6 +1520,7 @@ async function renderPromptSettings() {
   $('#prompt-new').value = state.settings.prompt_new || state.promptDefaults.new;
   $('#prompt-resume').value = state.settings.prompt_resume || state.promptDefaults.resume;
   $('#prompt-qa').value = state.settings.prompt_qa || state.promptDefaults.qa;
+  $('#prompt-merge').value = state.settings.prompt_merge || state.promptDefaults.merge;
   $('#auto-claim-prompt').value = state.promptDefaults.auto_claim || '';
 }
 
@@ -1758,6 +1885,10 @@ function init() {
     if (e.key === 'Escape' && state.projectPanelOpen) setProjectPanel(false);
   });
   $('#settings-btn').onclick = openSettings;
+  // 多选模式（合并融合）：顶栏 ☑ 开关；批量栏的合并/退出
+  $('#select-btn').onclick = () => toggleSelectMode();
+  $('#batch-exit').onclick = () => toggleSelectMode(false);
+  $('#batch-merge').onclick = (e) => submitMerge(e.currentTarget);
   $('#settings-close').onclick = closeSettings;
   // 额度区：💰 切换显示，展开状态持久化
   $('#quota-btn').onclick = () => setQuotaBar($('#quota-bar').classList.contains('hidden'));
@@ -1830,6 +1961,7 @@ function init() {
           prompt_new: tplOrNull('#prompt-new', state.promptDefaults.new),
           prompt_resume: tplOrNull('#prompt-resume', state.promptDefaults.resume),
           prompt_qa: tplOrNull('#prompt-qa', state.promptDefaults.qa),
+          prompt_merge: tplOrNull('#prompt-merge', state.promptDefaults.merge),
         },
       });
       toast('提示词模板已保存');
@@ -1842,11 +1974,12 @@ function init() {
     try {
       state.settings = await api('/api/settings', {
         method: 'PATCH',
-        body: { prompt_new: null, prompt_resume: null, prompt_qa: null },
+        body: { prompt_new: null, prompt_resume: null, prompt_qa: null, prompt_merge: null },
       });
       $('#prompt-new').value = state.promptDefaults.new;
       $('#prompt-resume').value = state.promptDefaults.resume;
       $('#prompt-qa').value = state.promptDefaults.qa;
+      $('#prompt-merge').value = state.promptDefaults.merge;
       toast('已恢复内置模板');
     } catch (err) {
       toast(err.message, 'error');

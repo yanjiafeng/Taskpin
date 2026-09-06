@@ -1296,3 +1296,63 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   .drawer-loading .load-note, .drawer-loading .load-note::before { animation: none; }
   .column-header .chev { transition: none; }
 }
+
+/* ---------- 多选与合并融合 ---------- */
+/* 顶栏多选开关的激活态 */
+#select-btn.active {
+  background: var(--pin);
+  color: #fff;
+  border-radius: 999px;
+}
+/* 多选模式：可合并卡片左上角勾选框（便签上的圆形图章） */
+.card.selectable { padding-left: 34px; }
+.card .c-check {
+  position: absolute;
+  left: 8px;
+  top: 10px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px dashed rgba(74, 63, 48, 0.55);
+  background: rgba(255, 255, 255, 0.55);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  font-weight: 700;
+}
+.card.selected .c-check {
+  border: 1.5px solid var(--pin);
+  background: var(--pin);
+}
+.card.selected {
+  outline: 2px solid var(--pin);
+  outline-offset: 1px;
+}
+/* 融合草案胶囊：紫调区分普通元信息 */
+.card .pill.merge-draft {
+  border-color: rgba(109, 76, 147, 0.55);
+  color: #5b3f7d;
+  background: rgba(167, 139, 250, 0.22);
+}
+/* 底部批量操作栏：固定浮条，纸张风 */
+#batch-bar {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  transform: translateX(-50%) rotate(-0.5deg);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--note-yellow);
+  color: var(--ink);
+  border-radius: 3px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 2px 3px rgba(60, 40, 20, 0.3), 0 12px 14px -6px rgba(60, 40, 20, 0.5);
+  max-width: 94vw;
+  flex-wrap: wrap;
+}
+#batch-bar .btn:disabled { opacity: 0.45; cursor: not-allowed; }

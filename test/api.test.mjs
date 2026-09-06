@@ -1034,3 +1034,104 @@ test('评论顺序：问答多轮交错，详情接口严格按提交先后返�
   const ids = detail.data.comments.map((c) => c.id);
   assert.deepEqual(ids, [...ids].sort((a, b) => a - b));
 });
+
+test('合并融合：merge 出草案 + 自动发起融合执行，merge-confirm / merge-cancel 生效', async () => {
+  const { EventEmitter } = await import('node:events');
+  const procs = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    const p = new EventEmitter();
+    p.pid = 50000 + procs.length;
+    p.stdout = new EventEmitter();
+    p.stderr = new EventEmitter();
+    p.kill = () => { p.killed = true; p.emit('exit', 143); };
+    procs.push({ proc: p, cmd, args, opts });
+    return p;
+  };
+  const app = createApp({ dbPath: ':memory:', spawnFn: fakeSpawn });
+  const srv = app.server;
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  const rq = async (method, path, body) => {
+    const res = await fetch(b + path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  try {
+    // 主目录隔离到临时目录（融合执行会 resolveMainDir）
+    await rq('PATCH', '/api/projects/1', { main_dir: mkdtempSync(join(tmpdir(), 'tb-merge-')) });
+    const t1 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并A', priority: 'high' })).data;
+    const t2 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并B' })).data;
+    const t3 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并C' })).data;
+
+    // 校验分支：1 个任务 / 已取消 / 进行中 → 400/422；草案未产生
+    assert.equal((await rq('POST', '/api/tasks/merge', { ids: [t1.id] })).status, 400);
+    const canceled = (await rq('POST', '/api/tasks', { project_id: 1, title: 'X' })).data;
+    await rq('PATCH', `/api/tasks/${canceled.id}`, { version: 1, status: 'canceled' });
+    assert.equal((await rq('POST', '/api/tasks/merge', { ids: [t1.id, canceled.id] })).status, 422);
+    await rq('POST', `/api/tasks/${t3.id}/claim`, {});
+    assert.equal((await rq('POST', '/api/tasks/merge', { ids: [t1.id, t3.id] })).status, 422);
+
+    // 正常合并：201，草案 backlog、merged_from 记录 version、优先级取最高，自动发起 merge 模式融合执行
+    const merged = await rq('POST', '/api/tasks/merge', { ids: [t1.id, t2.id], agent: 'kimi' });
+    assert.equal(merged.status, 201);
+    const draft = merged.data.task;
+    assert.equal(draft.status, 'backlog');
+    assert.equal(draft.priority, 'high');
+    assert.deepEqual(JSON.parse(draft.merged_from), [{ id: t1.id, version: 1 }, { id: t2.id, version: 1 }]);
+    assert.equal(merged.data.run.agent, 'kimi');
+    assert.ok(merged.data.run.mode.includes('融合'));
+    // 融合 prompt：merge 模板 + 源任务列表注入 + 不自动流转（草案仍在 backlog）
+    const prompt = procs[0].args[procs[0].args.length - 1];
+    assert.ok(prompt.includes('融合'));
+    assert.ok(prompt.includes(`#${t1.id}`) && prompt.includes(`#${t2.id}`));
+    assert.ok(prompt.includes('不要修改任何源任务'));
+    assert.equal((await rq('GET', `/api/tasks/${draft.id}`)).data.status, 'backlog');
+    // 源任务保持原状 + 互链评论
+    const d1 = (await rq('GET', `/api/tasks/${t1.id}`)).data;
+    assert.equal(d1.status, 'todo');
+    assert.ok(d1.comments.some((c) => c.body.includes(`融合草案 #${draft.id}`)));
+
+    // 融合执行结束（agent 重写描述并进 todo，模拟：进程退出 + 手动流转）
+    procs[0].proc.emit('exit', 0);
+    await rq('PATCH', `/api/tasks/${draft.id}`, { version: draft.version, status: 'todo' });
+
+    // merge-confirm：源任务置已取消 + 互链，草案 merged_from 清空
+    const confirmed = await rq('POST', `/api/tasks/${draft.id}/merge-confirm`);
+    assert.equal(confirmed.status, 200);
+    assert.equal((await rq('GET', `/api/tasks/${t1.id}`)).data.status, 'canceled');
+    const d2 = (await rq('GET', `/api/tasks/${t2.id}`)).data;
+    assert.equal(d2.status, 'canceled');
+    assert.ok(d2.comments.some((c) => c.body.includes(`已合并进 #${draft.id}`)));
+    assert.equal(confirmed.data.merged_from, null);
+    // 重复确认 → 400
+    assert.equal((await rq('POST', `/api/tasks/${draft.id}/merge-confirm`)).status, 400);
+
+    // 第二轮：merge-cancel —— 草案取消，源任务不受影响
+    const t4 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并D' })).data;
+    const t5 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并E' })).data;
+    const merged2 = await rq('POST', '/api/tasks/merge', { ids: [t4.id, t5.id], agent: 'kimi' });
+    assert.equal(merged2.status, 201);
+    procs[1].proc.emit('exit', 0); // 融合执行结束
+    const canceledDraft = await rq('POST', `/api/tasks/${merged2.data.task.id}/merge-cancel`);
+    assert.equal(canceledDraft.status, 200);
+    assert.equal(canceledDraft.data.status, 'canceled');
+    assert.equal((await rq('GET', `/api/tasks/${t4.id}`)).data.status, 'todo');
+    assert.equal((await rq('GET', `/api/tasks/${t5.id}`)).data.status, 'todo');
+
+    // merge-confirm 过期检测：草案生成后源任务被改动 → 409
+    const t6 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并F' })).data;
+    const t7 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并G' })).data;
+    const merged3 = await rq('POST', '/api/tasks/merge', { ids: [t6.id, t7.id], agent: 'kimi' });
+    procs[2].proc.emit('exit', 0);
+    await rq('PATCH', `/api/tasks/${t6.id}`, { version: 1, title: '合并F改' });
+    const stale = await rq('POST', `/api/tasks/${merged3.data.task.id}/merge-confirm`);
+    assert.equal(stale.status, 409);
+    assert.equal(stale.data.error.code, 'VERSION_CONFLICT');
+    assert.equal((await rq('GET', `/api/tasks/${t7.id}`)).data.status, 'todo'); // 整体回滚
+  } finally {
+    srv.close();
+  }
+});

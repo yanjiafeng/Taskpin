@@ -2,7 +2,7 @@
 import {
   listProjects, createProject, updateProject, deleteProject, listTasks, getTaskWithComments,
   createTask, updateTask, claimTask, addComment, deleteTasks, getSettings, updateSettings,
-  saveAttachments, DbError,
+  saveAttachments, mergeTasks, confirmMerge, cancelMerge, DbError,
 } from './db.mjs';
 import { PROMPT_DEFAULTS, AUTO_CLAIM_PROMPT, getAgentOptions } from './runner.mjs';
 import { readFile } from 'node:fs/promises';
@@ -52,7 +52,7 @@ function readBody(req) {
 
 export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir, quota, tts }) {
   return async function handleApi(req, res, url) {
-    const m = url.pathname.match(/^\/api\/tasks\/(\d+)(\/claim|\/comments|\/execute|\/run|\/run\/output)?$/);
+    const m = url.pathname.match(/^\/api\/tasks\/(\d+)(\/claim|\/comments|\/execute|\/run|\/run\/output|\/merge-confirm|\/merge-cancel)?$/);
     const pm = url.pathname.match(/^\/api\/projects\/(\d+)$/);
     const am = url.pathname.match(/^\/api\/attachments\/(\d+)\/([\w.-]+)$/);
     try {
@@ -197,6 +197,23 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
         return sendJson(res, 200, result);
       }
 
+      // 合并融合第一步（出草案）：校验（2~5 个、同项目、非已取消/进行中）→ 建 backlog 草案（merged_from
+      // 记录源任务 id+version）→ 自动以 merge 模式发起融合执行。执行启动失败不阻断（草案已建好，
+      // 可稍后从详情抽屉手动执行）；run 为 null 时前端据此提示手动发起。
+      if (req.method === 'POST' && url.pathname === '/api/tasks/merge') {
+        const body = await readBody(req);
+        const draft = mergeTasks(db, body.ids);
+        broadcast('tasks');
+        let run = null;
+        let runError = null;
+        try {
+          run = runner.start(draft.id, body.agent || getSettings(db).agents[0], { mode: 'merge' });
+        } catch (err) {
+          runError = err.message;
+        }
+        return sendJson(res, 201, { task: getTaskWithComments(db, draft.id), run, run_error: runError });
+      }
+
       // task item
       if (m) {
         const id = Number(m[1]);
@@ -251,6 +268,18 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
           const comment = addComment(db, id, { author: body.author ?? 'user', body: body.body, images });
           broadcast('tasks');
           return sendJson(res, 201, comment);
+        }
+        // 合并融合第二步：确认生效（源任务 version 校验 → 同事务置已取消 + 互链评论）
+        if (req.method === 'POST' && sub === '/merge-confirm') {
+          const task = confirmMerge(db, id);
+          broadcast();
+          return sendJson(res, 200, task);
+        }
+        // 合并融合第二步：放弃（草案置已取消，源任务不受影响）
+        if (req.method === 'POST' && sub === '/merge-cancel') {
+          const task = cancelMerge(db, id);
+          broadcast();
+          return sendJson(res, 200, task);
         }
       }
 
