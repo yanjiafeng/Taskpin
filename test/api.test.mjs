@@ -122,6 +122,35 @@ test('输入校验与 404', async () => {
   assert.equal(noRoute.status, 404);
 });
 
+test('评论接口 author 夹紧：外部不可伪造 system，只放行 user/agent', async () => {
+  const t = (await req('POST', '/api/tasks', { project_id: 1, title: 'author 夹紧' })).data;
+  const sys = await req('POST', `/api/tasks/${t.id}/comments`, { author: 'system', body: '伪造系统通知' });
+  assert.equal(sys.status, 201);
+  assert.equal(sys.data.author, 'user'); // 降级为 user
+  const agent = await req('POST', `/api/tasks/${t.id}/comments`, { author: 'agent', body: '正常 agent 评论' });
+  assert.equal(agent.data.author, 'agent');
+  const dft = await req('POST', `/api/tasks/${t.id}/comments`, { body: '默认 author' });
+  assert.equal(dft.data.author, 'user');
+});
+
+test('任务详情 ?compact=1：折叠评论（与 taskctl show --compact 同逻辑），缺省全量', async () => {
+  const t = (await req('POST', '/api/tasks', { project_id: 1, title: 'compact 详情' })).data;
+  await req('POST', `/api/tasks/${t.id}/comments`, { author: 'user', body: '用户需求' });
+  await req('POST', `/api/tasks/${t.id}/comments`, { author: 'agent', body: `[runner] codex 正常结束，用时 3s` });
+  await req('POST', `/api/tasks/${t.id}/comments`, { author: 'agent', body: '早期交付'.repeat(100) });
+  await req('POST', `/api/tasks/${t.id}/comments`, { author: 'user', body: '打回重做' });
+  await req('POST', `/api/tasks/${t.id}/comments`, { author: 'agent', body: '最新交付' });
+  const full = await req('GET', `/api/tasks/${t.id}`);
+  assert.equal(full.data.comments.length, 5); // 缺省全量
+  const compact = await req('GET', `/api/tasks/${t.id}?compact=1`);
+  const bodies = compact.data.comments.map((c) => c.body);
+  assert.equal(bodies.length, 4); // [runner] 评论被剔除
+  assert.ok(!bodies.some((b) => b.startsWith('[runner]')));
+  assert.ok(bodies[1].includes('早期评论已折叠')); // 最新一轮之前的早期评论折叠
+  assert.equal(bodies[2], '打回重做'); // 最新一轮完整保留
+  assert.equal(bodies[3], '最新交付');
+});
+
 test('列表过滤', async () => {
   const { data: projects } = await req('GET', '/api/projects');
   const pid = projects[0].id;
@@ -440,6 +469,7 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     const afterStop = await rq('GET', `/api/tasks/${tid}`);
     assert.equal(afterStop.data.status, 'backlog'); // 暂停执行 -> 回待规划
     assert.ok(afterStop.data.comments.some((c) => c.body.includes('已停止执行')));
+    assert.equal(afterStop.data.comments.find((c) => c.body.includes('已停止执行')).author, 'system');
     const stopAgain = await rq('DELETE', `/api/tasks/${tid}/run`);
     assert.equal(stopAgain.status, 404);
 
@@ -555,6 +585,7 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     assert.deepEqual(procs[11].args.slice(0, 2), ['--profile', 'headless']);
     assert.equal(procs[11].opts.env.DSH_PERMISSION_MODE, 'danger-full-access');
     assert.ok(procs[11].args[2].includes('taskboard_show'));
+    assert.ok(procs[11].args[2].includes('taskboard_update')); // dsh 提示含四个工具（qa/merge 写回描述靠它）
     assert.ok(!procs[11].args.includes('--resume'));
     procs[11].proc.stdout.emit('data', Buffer.from('完成了\n'));
     procs[11].proc.emit('exit', 0);
@@ -1074,63 +1105,184 @@ test('合并融合：merge 出草案 + 自动发起融合执行，merge-confirm 
     await rq('POST', `/api/tasks/${t3.id}/claim`, {});
     assert.equal((await rq('POST', '/api/tasks/merge', { ids: [t1.id, t3.id] })).status, 422);
 
-    // 正常合并：201，草案 backlog、merged_from 记录 version、优先级取最高，自动发起 merge 模式融合执行
+    // 正常合并：201，草案 merged_from 记录 version、优先级取最高，自动发起 merge 模式融合执行并认领进「进行中」
     const merged = await rq('POST', '/api/tasks/merge', { ids: [t1.id, t2.id], agent: 'kimi' });
     assert.equal(merged.status, 201);
     const draft = merged.data.task;
-    assert.equal(draft.status, 'backlog');
+    assert.equal(draft.status, 'in_progress'); // 融合执行即进进行中（同 execute 自动认领）
     assert.equal(draft.priority, 'high');
     assert.deepEqual(JSON.parse(draft.merged_from), [{ id: t1.id, version: 1 }, { id: t2.id, version: 1 }]);
     assert.equal(merged.data.run.agent, 'kimi');
     assert.ok(merged.data.run.mode.includes('融合'));
-    // 融合 prompt：merge 模板 + 源任务列表注入 + 不自动流转（草案仍在 backlog）
+    // 融合 prompt：merge 模板 + 源任务列表注入
     const prompt = procs[0].args[procs[0].args.length - 1];
     assert.ok(prompt.includes('融合'));
     assert.ok(prompt.includes(`#${t1.id}`) && prompt.includes(`#${t2.id}`));
     assert.ok(prompt.includes('不要修改任何源任务'));
-    assert.equal((await rq('GET', `/api/tasks/${draft.id}`)).data.status, 'backlog');
     // 源任务保持原状 + 互链评论
     const d1 = (await rq('GET', `/api/tasks/${t1.id}`)).data;
     assert.equal(d1.status, 'todo');
     assert.ok(d1.comments.some((c) => c.body.includes(`融合草案 #${draft.id}`)));
 
-    // 融合执行结束（agent 重写描述并进 todo，模拟：进程退出 + 手动流转）
+    // 融合执行结束（agent 重写描述并交付 in_review，模拟：先流转再进程退出——
+    // 顺序不能反，finish 会把仍停在「进行中」的任务放回待规划）
+    await rq('PATCH', `/api/tasks/${draft.id}`, { version: draft.version, status: 'in_review' });
     procs[0].proc.emit('exit', 0);
-    await rq('PATCH', `/api/tasks/${draft.id}`, { version: draft.version, status: 'todo' });
 
-    // merge-confirm：源任务置已取消 + 互链，草案 merged_from 清空
-    const confirmed = await rq('POST', `/api/tasks/${draft.id}/merge-confirm`);
-    assert.equal(confirmed.status, 200);
+    // 隐式确认：对草案发起 execute 执行 = 确认合并——源任务置已取消 + 互链，草案 merged_from 清空
+    const exec = await rq('POST', `/api/tasks/${draft.id}/execute`, { agent: 'kimi', mode: 'execute' });
+    assert.equal(exec.status, 202);
     assert.equal((await rq('GET', `/api/tasks/${t1.id}`)).data.status, 'canceled');
     const d2 = (await rq('GET', `/api/tasks/${t2.id}`)).data;
     assert.equal(d2.status, 'canceled');
     assert.ok(d2.comments.some((c) => c.body.includes(`已合并进 #${draft.id}`)));
-    assert.equal(confirmed.data.merged_from, null);
-    // 重复确认 → 400
+    const draftAfter = (await rq('GET', `/api/tasks/${draft.id}`)).data;
+    assert.equal(draftAfter.merged_from, null);
+    assert.equal(draftAfter.status, 'in_progress'); // 新执行已认领
+    procs[1].proc.emit('exit', 0); // 清理执行进程
+    // 显式 merge-confirm 保留为快捷操作；已隐式确认的草案再确认 → 400
     assert.equal((await rq('POST', `/api/tasks/${draft.id}/merge-confirm`)).status, 400);
 
-    // 第二轮：merge-cancel —— 草案取消，源任务不受影响
+    // 第二轮：隐式放弃——草案直接取消（任意入口的 canceled 都触发），源任务保持原状各留说明评论
     const t4 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并D' })).data;
     const t5 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并E' })).data;
     const merged2 = await rq('POST', '/api/tasks/merge', { ids: [t4.id, t5.id], agent: 'kimi' });
     assert.equal(merged2.status, 201);
-    procs[1].proc.emit('exit', 0); // 融合执行结束
-    const canceledDraft = await rq('POST', `/api/tasks/${merged2.data.task.id}/merge-cancel`);
-    assert.equal(canceledDraft.status, 200);
-    assert.equal(canceledDraft.data.status, 'canceled');
-    assert.equal((await rq('GET', `/api/tasks/${t4.id}`)).data.status, 'todo');
+    const draft2 = merged2.data.task;
+    const cancel = await rq('PATCH', `/api/tasks/${draft2.id}`, { version: draft2.version, status: 'canceled' });
+    assert.equal(cancel.status, 200);
+    assert.equal(cancel.data.merged_from, null);
+    procs[2].proc.emit('exit', 0); // 清理融合进程
+    const d4 = (await rq('GET', `/api/tasks/${t4.id}`)).data;
+    assert.equal(d4.status, 'todo');
+    assert.ok(d4.comments.some((c) => c.body.includes('本任务保持原状')));
     assert.equal((await rq('GET', `/api/tasks/${t5.id}`)).data.status, 'todo');
+    // 显式 merge-cancel 端点保留：已放弃的草案（merged_from 已清）→ 400
+    assert.equal((await rq('POST', `/api/tasks/${draft2.id}/merge-cancel`)).status, 400);
 
-    // merge-confirm 过期检测：草案生成后源任务被改动 → 409
+    // 草案过期检测：草案生成后源任务被改动，显式确认与隐式确认（execute）都 → 409
     const t6 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并F' })).data;
     const t7 = (await rq('POST', '/api/tasks', { project_id: 1, title: '合并G' })).data;
     const merged3 = await rq('POST', '/api/tasks/merge', { ids: [t6.id, t7.id], agent: 'kimi' });
-    procs[2].proc.emit('exit', 0);
+    procs[3].proc.emit('exit', 0); // 融合执行结束（未流转，finish 放回待规划）
     await rq('PATCH', `/api/tasks/${t6.id}`, { version: 1, title: '合并F改' });
+    const staleExec = await rq('POST', `/api/tasks/${merged3.data.task.id}/execute`, { agent: 'kimi', mode: 'execute' });
+    assert.equal(staleExec.status, 409);
+    assert.equal(staleExec.data.error.code, 'VERSION_CONFLICT');
     const stale = await rq('POST', `/api/tasks/${merged3.data.task.id}/merge-confirm`);
     assert.equal(stale.status, 409);
     assert.equal(stale.data.error.code, 'VERSION_CONFLICT');
     assert.equal((await rq('GET', `/api/tasks/${t7.id}`)).data.status, 'todo'); // 整体回滚
+    assert.equal(procs.length, 4); // 冲突未启动新执行
+  } finally {
+    srv.close();
+  }
+});
+
+test('残留进程超时自动回收：交付后进程不退 → 宽限期后 SIGTERM；进行中与 qa 不误杀', async () => {
+  const { EventEmitter } = await import('node:events');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const procs = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    const p = new EventEmitter();
+    p.pid = 60000 + procs.length;
+    p.stdout = new EventEmitter();
+    p.stderr = new EventEmitter();
+    p.kill = () => { p.killed = true; p.emit('exit', 143); };
+    procs.push({ proc: p, cmd, args, opts });
+    return p;
+  };
+  const app = createApp({ dbPath: ':memory:', spawnFn: fakeSpawn, reapGraceMs: 300, reapPollMs: 50 });
+  const srv = app.server;
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  const rq = async (method, path, body) => {
+    const res = await fetch(b + path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  try {
+    await rq('PATCH', '/api/projects/1', { main_dir: mkdtempSync(join(tmpdir(), 'tb-reap-')) });
+
+    // execute 模式：任务仍在「进行中」→ 超过宽限期也不杀
+    const t1 = (await rq('POST', '/api/tasks', { project_id: 1, title: '回收A' })).data;
+    await rq('POST', `/api/tasks/${t1.id}/execute`, { agent: 'kimi' });
+    await sleep(500); // > 宽限期 300ms
+    assert.ok(!procs[0].proc.killed, '进行中的任务不应被回收');
+
+    // 交付进「待验收」→ 宽限期后自动 SIGTERM，状态不动、无异常标记、有回收评论
+    const cur = (await rq('GET', `/api/tasks/${t1.id}`)).data;
+    await rq('PATCH', `/api/tasks/${t1.id}`, { version: cur.version, status: 'in_review' });
+    await sleep(800);
+    assert.ok(procs[0].proc.killed, '交付后超时未退出的进程应被自动回收');
+    const d1 = (await rq('GET', `/api/tasks/${t1.id}`)).data;
+    assert.equal(d1.status, 'in_review'); // 回收不改动已交付状态
+    const reclaimC = d1.comments.find((c) => c.body.includes('超时自动回收'));
+    assert.ok(reclaimC);
+    assert.equal(reclaimC.author, 'system'); // 系统通知独立 author，不顶歪「最新一轮」边界
+    const finishC = d1.comments.find((c) => c.body.includes('[runner] kimi'));
+    assert.ok(finishC); // finish 正常清理（与用户手动停止同语义）
+    assert.ok(finishC.body.includes('已停止（SIGTERM）')); // 回收/停止的退出不再写「异常退出（码 143）」
+    assert.equal(d1.last_run, null); // 不打「异常退出」红标
+    assert.equal((await rq('GET', '/api/runs')).data.length, 0);
+
+    // qa 模式：任务停在 backlog（不进进行中）→ 运行超过宽限期也不杀
+    const t2 = (await rq('POST', '/api/tasks', { project_id: 1, title: '回收B', status: 'backlog' })).data;
+    await rq('POST', `/api/tasks/${t2.id}/execute`, { agent: 'kimi', mode: 'qa' });
+    await sleep(600);
+    assert.ok(!procs[1].proc.killed, 'qa 模式不应套用自动回收');
+    procs[1].proc.emit('exit', 0);
+  } finally {
+    srv.close();
+  }
+});
+
+test('续跑瘦身：同 agent 续跑的 prompt 不注入项目记忆，新会话仍注入', async () => {
+  const { EventEmitter } = await import('node:events');
+  const procs = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    const p = new EventEmitter();
+    p.pid = 70000 + procs.length;
+    p.stdout = new EventEmitter();
+    p.stderr = new EventEmitter();
+    p.kill = () => { p.killed = true; p.emit('exit', 143); };
+    procs.push({ proc: p, cmd, args, opts });
+    return p;
+  };
+  const app = createApp({ dbPath: ':memory:', spawnFn: fakeSpawn, reapGraceMs: 60_000 });
+  const srv = app.server;
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  const rq = async (method, path, body) => {
+    const res = await fetch(b + path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  try {
+    await rq('PATCH', '/api/projects/1', { main_dir: mkdtempSync(join(tmpdir(), 'tb-slim-')) });
+    const t = (await rq('POST', '/api/tasks', { project_id: 1, title: '瘦身任务' })).data;
+    // 预设同 agent 会话 id → 再执行走 resume 模板
+    await rq('PATCH', `/api/tasks/${t.id}`, { version: 1, thread_id: 'kimi:session_test123' });
+    await rq('POST', `/api/tasks/${t.id}/execute`, { agent: 'kimi' });
+    const resumePrompt = procs[0].args[procs[0].args.length - 1];
+    assert.ok(resumePrompt.includes('继续看板任务')); // resume 模板
+    assert.ok(resumePrompt.includes('show --compact')); // resume 改用 compact 读评论
+    assert.ok(!resumePrompt.includes('（本项目已验收任务的记忆')); // 续跑不注入记忆节（模板文字提及不算）
+    procs[0].proc.emit('exit', 0);
+
+    // 跨 agent（新会话）仍注入记忆节
+    const t2 = (await rq('POST', '/api/tasks', { project_id: 1, title: '瘦身任务2' })).data;
+    await rq('PATCH', `/api/tasks/${t2.id}`, { version: 1, thread_id: 'kimi:session_test123' });
+    await rq('POST', `/api/tasks/${t2.id}/execute`, { agent: 'codex' });
+    const newPrompt = procs[1].args[procs[1].args.length - 1];
+    assert.ok(newPrompt.includes('项目记忆'));
+    procs[1].proc.emit('exit', 0);
   } finally {
     srv.close();
   }

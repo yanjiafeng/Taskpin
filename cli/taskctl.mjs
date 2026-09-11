@@ -5,7 +5,7 @@ import {
   openDb, defaultDbPath, ensureDefaultProject,
   listProjects, createProject, updateProject, deleteProject, listTasks, getTaskWithComments,
   createTask, claimTask, updateTask, addComment, saveAttachments, attachmentsDir, searchMemories,
-  mergeTasks, confirmMerge, cancelMerge, DbError,
+  mergeTasks, confirmMerge, cancelMerge, compactComments, DbError,
 } from '../server/db.mjs';
 import { startServer } from '../server/index.mjs';
 import { readFileSync } from 'node:fs';
@@ -22,7 +22,7 @@ commands:
   project-update ID [--name N] [--path P1,P2] [--main-dir D]  修改项目（--path "" 清空路径，--main-dir "" 恢复默认）
   project-delete ID                      删除项目（仅限没有未取消任务的项目，任务与评论一并删除）
   list [--project ID] [--status S] [--all] [--pretty]
-  show ID                                任务详情 + 全部评论
+  show ID [--compact]                      任务详情 + 全部评论（--compact 续跑省 token：剔除 [runner] 评论、折叠早期评论）
   create --title T [--project ID] [--desc D] [--status S] [--priority low|normal|high]
   claim ID [--thread-id X]               原子认领：todo -> in_progress
   update ID --if-version N [--status S] [--title T] [--desc D] [--priority P] [--thread-id X] [--tags a,b,c]
@@ -142,6 +142,8 @@ function main() {
     case 'show': {
       const id = Number(need(pos[0], 'task id is required'));
       const t = getTaskWithComments(db, id);
+      // --compact：续跑省 token（剔除 [runner] 评论、折叠「最新一轮」之前的早期评论）
+      if (flags.compact === true) t.comments = compactComments(t.comments);
       // 图片附件转成绝对路径，agent 可直接用读图工具查看
       t.comments.forEach((c) => { c.images = (c.images || []).map((img) => join(attachmentsDir(dbPath), img)); });
       if (pretty) {
@@ -225,8 +227,10 @@ function main() {
       // --image 可多次：读文件转 dataURL，存到 <db 目录>/attachments/<taskId>/
       const imagePaths = flags.image != null ? [flags.image].flat() : [];
       const images = saveAttachments(attachmentsDir(dbPath), id, imagePaths.map((p) => fileToDataUrl(p)));
+      // --author 只放行 user/agent；system 是服务端内部通知专用，CLI 不可伪造
+      const author = ['user', 'agent'].includes(flags.author) ? flags.author : 'agent';
       out(addComment(db, id, {
-        author: flags.author ?? 'agent',
+        author,
         body: images.length ? (flags.body ?? '') : need(flags.body, '--body is required'),
         images,
       }));

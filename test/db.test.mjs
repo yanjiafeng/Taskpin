@@ -9,7 +9,7 @@ import {
   openDb, ensureDefaultProject, listProjects, createProject, updateProject, resolveMainDir,
   listTasks, getTask, getTaskWithComments, createTask, claimTask, updateTask, addComment, setTaskLastRun, setTaskUsage, setTaskExecOpts,
   normalizeTags, recentMemories, searchMemories, archiveProjectMemories,
-  mergeTasks, confirmMerge, cancelMerge, DbError,
+  mergeTasks, confirmMerge, cancelMerge, compactComments, DbError,
 } from '../server/db.mjs';
 import { parseUsage } from '../server/runner.mjs';
 
@@ -296,6 +296,17 @@ test('评论落库并计入 comment_count', () => {
   assert.throws(() => addComment(db, t.id, { body: '' }), (e) => e.code === 'VALIDATION');
 });
 
+test('addComment author：放行 user/agent/system，其余拒绝', () => {
+  const db = freshDb();
+  const p = ensureDefaultProject(db);
+  const t = createTask(db, { projectId: p.id, title: 'task' });
+  const sys = addComment(db, t.id, { author: 'system', body: '超时自动回收' });
+  assert.equal(sys.author, 'system');
+  const detail = getTaskWithComments(db, t.id);
+  assert.equal(detail.comments[0].author, 'system');
+  assert.throws(() => addComment(db, t.id, { author: 'root', body: 'x' }), (e) => e.code === 'VALIDATION');
+});
+
 test('listTasks 过滤与取消任务可见性', () => {
   const db = freshDb();
   const p1 = ensureDefaultProject(db);
@@ -454,7 +465,7 @@ test('任务标签：tags 列默认 []，updateTask 写入/校验/清空', () =>
   assert.throws(() => normalizeTags(null), (e) => e.code === 'VALIDATION');
 });
 
-test('parseUsage：codex / reasonix 输出解析，kimi 与无用量输出返回 null', () => {
+test('parseUsage：codex / reasonix / dsh 输出解析，kimi 与无用量输出返回 null', () => {
   // codex：尾部 "tokens used\n10,850"
   assert.deepEqual(parseUsage('codex', '好了\ntokens used\n10,850\n好了'), { tokens: 10850 });
   assert.equal(parseUsage('codex', '没有用量行'), null);
@@ -465,6 +476,10 @@ test('parseUsage：codex / reasonix 输出解析，kimi 与无用量输出返回
   // kimi -p 不输出用量
   assert.equal(parseUsage('kimi', '好了\n\nTo resume this session: kimi -r session_x'), null);
   assert.equal(parseUsage('kimi', ''), null);
+  // dsh：插件退出时打的 `dsh-usage: {...}` 行（input + output）
+  assert.deepEqual(parseUsage('dsh', '最终答复\ndsh-usage: {"input_tokens":1200,"output_tokens":300}'), { input_tokens: 1200, output_tokens: 300, tokens: 1500 });
+  assert.equal(parseUsage('dsh', '没有用量行'), null);
+  assert.equal(parseUsage('dsh', 'dsh-usage: 坏JSON'), null);
 });
 
 test('mergeTasks：校验（数量/同项目/状态）+ 建 backlog 草案（merged_from 记录 version，优先级取最高、标签取并集）', () => {
@@ -556,4 +571,33 @@ test('cancelMerge：放弃——草案取消、merged_from 清除、源任务不
   assert.throws(() => cancelMerge(db, draft.id), (e) => e.code === 'VALIDATION');
   // 非草案拒绝
   assert.throws(() => cancelMerge(db, a.id), (e) => e.code === 'VALIDATION');
+});
+
+test('compactComments：剔除 [runner]、折叠最新一轮之前的早期评论、最新一轮完整保留', () => {
+  const comments = [
+    { id: 1, author: 'user', body: '需求：' + '长'.repeat(300) },
+    { id: 2, author: 'agent', body: '[runner] kimi 正常结束，输出尾部：xxx' },
+    { id: 3, author: 'agent', body: '早期交付摘要：' + '长'.repeat(300) },
+    { id: 4, author: 'user', body: '验收意见：改这里' },
+    { id: 5, author: 'agent', body: '本轮修改完成：' + '长'.repeat(300) },
+  ];
+  const out = compactComments(comments);
+  // [runner] 被剔除
+  assert.ok(!out.some((c) => c.body.startsWith('[runner]')));
+  // 最新一轮（最后一次 user 评论到末尾）完整保留
+  assert.equal(out.find((c) => c.id === 4).body, '验收意见：改这里');
+  assert.equal(out.find((c) => c.id === 5).body, comments[4].body);
+  // 早期评论折叠为 200 字符 + 折叠标记
+  const early = out.find((c) => c.id === 3);
+  assert.ok(early.body.length < 260 && early.body.includes('早期评论已折叠'));
+  // 短评论不足 200 字符不折叠
+  const short = compactComments([{ id: 1, author: 'agent', body: '短' }]);
+  assert.equal(short[0].body, '短');
+  // 无用户评论时保底最后一条完整
+  const noUser = compactComments([
+    { id: 1, author: 'agent', body: 'a'.repeat(300) },
+    { id: 2, author: 'agent', body: 'b'.repeat(300) },
+  ]);
+  assert.ok(noUser[0].body.includes('早期评论已折叠'));
+  assert.equal(noUser[1].body, 'b'.repeat(300));
 });

@@ -1,6 +1,6 @@
 // dsh-taskpin：Taskpin 任务看板对接插件。
-// 1) 给 dsh agent 注册三个模型可见的原生工具（taskboard_show / taskboard_comment /
-//    taskboard_transition），agent 执行看板任务时直接调工具回写看板，
+// 1) 给 dsh agent 注册四个模型可见的原生工具（taskboard_show / taskboard_comment /
+//    taskboard_update / taskboard_transition），agent 执行看板任务时直接调工具回写看板，
 //    不必再通过 bash 拼 taskctl 命令。看板 API 走本机回环（Host 为 127.0.0.1 免认证），
 //    地址默认 http://127.0.0.1:47824，可用环境变量 TASKBOARD_API 覆盖。
 // 2) 进度上报：dsh headless 只在跑完后把最终答复打一次 stdout，执行过程全程静默，
@@ -68,9 +68,24 @@ function startProgressReporter(ctx) {
     try { process.stderr.write(`${line}\n`); } catch { /* stderr 不可写时静默 */ }
   };
   const callNames = new Map(); // callId → 工具名（tool/result 事件不带名称）
+  // token 用量：assistant/message 事件自带 usage（dsh headless 本身不打用量），累计后在进程
+  // 退出时打一行 `dsh-usage: {...}` 到 stderr，看板 runner 的 parseUsage 据此填 tasks.usage
+  let usageTotal = null;
+  process.on('exit', () => {
+    if (!usageTotal) return;
+    try {
+      process.stderr.write(`dsh-usage: ${JSON.stringify(usageTotal)}\n`); // exit 钩子内同步写
+    } catch { /* stderr 不可写时静默 */ }
+  });
   ctx.on('session/event', (_session, event) => {
     try {
       if (event.type === 'assistant/message') {
+        const u = event.data?.usage;
+        if (u) {
+          usageTotal ??= { input_tokens: 0, output_tokens: 0 };
+          usageTotal.input_tokens += u.inputTokens ?? 0;
+          usageTotal.output_tokens += u.outputTokens ?? 0;
+        }
         const text = textBlocks(event.data?.message?.content);
         if (text) write(text);
       } else if (event.type === 'tool/call') {
@@ -94,11 +109,35 @@ export function apply(ctx) {
   startProgressReporter(ctx);
   ctx.tools.register(defineTool({
     name: 'taskboard_show',
-    description: '读取 Taskpin 看板任务的完整信息（标题、描述、状态、version、全部评论）。执行看板任务、回写评论或流转状态前必须先调用它取得最新 version；评论的 images 字段是图片绝对路径。',
-    parameters: { task_id: TASK_ID },
+    description: '读取 Taskpin 看板任务的完整信息（标题、描述、状态、version、评论）。执行看板任务、回写评论或流转状态前必须先调用它取得最新 version；评论的 images 字段是图片绝对路径。compact（默认 true）折叠评论省 token：剔除 [runner] 进程记录、最新一轮之前的早期评论只留前 200 字符；确需全文时显式传 compact=false。',
+    parameters: {
+      task_id: TASK_ID,
+      compact: { type: 'boolean', description: '折叠评论省 token（默认 true）；需要早期评论全文时传 false' },
+    },
     output: { schema: { type: 'string' }, render: (_args, v) => asText(v) },
     async execute(args) {
-      return JSON.stringify(await api('GET', `/api/tasks/${args.task_id}`));
+      const qs = args.compact === false ? '' : '?compact=1';
+      return JSON.stringify(await api('GET', `/api/tasks/${args.task_id}${qs}`));
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'taskboard_update',
+    description: '更新 Taskpin 看板任务的标题/描述/标签（问答模式把结论写回任务描述、融合执行重写草案描述都走它）。必须带 taskboard_show 读到的最新 version（乐观锁，VERSION_CONFLICT 时重新 show 再试）。只传要改的字段；状态流转用 taskboard_transition。',
+    parameters: {
+      task_id: TASK_ID,
+      version: { type: 'integer', required: true, description: 'taskboard_show 返回的最新 version' },
+      title: { type: 'string', description: '新标题（不改不传）' },
+      description: { type: 'string', description: '新描述（不改不传）' },
+      tags: { type: 'array', items: { type: 'string' }, description: '标签数组，整体替换（≤8 个、单个 ≤20 字符）；传 [] 清空' },
+    },
+    output: { schema: { type: 'string' }, render: (_args, v) => asText(v) },
+    async execute(args) {
+      const patch = { version: args.version };
+      for (const k of ['title', 'description', 'tags']) {
+        if (args[k] != null) patch[k] = args[k];
+      }
+      return JSON.stringify(await api('PATCH', `/api/tasks/${args.task_id}`, patch));
     },
   }));
 

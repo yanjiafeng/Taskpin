@@ -6,7 +6,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getTask, updateTask, claimTask, addComment, setTaskThread, setTaskLastRun, setTaskUsage, setTaskExecOpts, listTasks, defaultDbPath, resolveMainDir, getSettings, recentMemories, searchMemories, AGENT_NAMES, DbError } from './db.mjs';
+import { getTask, updateTask, claimTask, addComment, setTaskThread, setTaskLastRun, setTaskUsage, setTaskExecOpts, listTasks, defaultDbPath, resolveMainDir, getSettings, recentMemories, searchMemories, confirmMerge, AGENT_NAMES, DbError } from './db.mjs';
 
 export { AGENT_NAMES };
 
@@ -109,6 +109,18 @@ export function parseUsage(agent, output) {
     try {
       const u = JSON.parse(line).usage;
       if (!u) return null;
+      const input = u.input_tokens ?? 0;
+      const outputTokens = u.output_tokens ?? 0;
+      return { input_tokens: input, output_tokens: outputTokens, tokens: input + outputTokens };
+    } catch { return null; }
+  }
+  if (agent === 'dsh') {
+    // dsh headless 自身不打用量；dsh-taskpin 插件累计 assistant/message 事件的 usage，
+    // 进程退出时打一行 `dsh-usage: {"input_tokens":N,"output_tokens":M}` 到 stderr
+    const line = output.trim().split('\n').reverse().find((l) => l.startsWith('dsh-usage: '));
+    if (!line) return null;
+    try {
+      const u = JSON.parse(line.slice('dsh-usage: '.length));
       const input = u.input_tokens ?? 0;
       const outputTokens = u.output_tokens ?? 0;
       return { input_tokens: input, output_tokens: outputTokens, tokens: input + outputTokens };
@@ -238,18 +250,20 @@ export const PROMPT_DEFAULTS = {
     '',
     '需要用户决策或信息不全时，不要猜测：comment（body 以 [提问] 开头，列出问题和可选方案）后 update --status blocked，等用户答复并重新执行你（会续跑本会话）。无法解决的硬阻塞同样 comment 说明后置 blocked。',
     '禁止将任务置为 done（done 只能由用户验收）。',
+    '沟通语言：所有写回看板的内容（评论、描述重写、[提问]）一律使用中文（代码、命令、标识符除外）。',
   ].join('\n'),
   resume: [
     '继续看板任务 #{{task_id}}（你之前执行过，本会话是续跑）。看板 CLI：{{tctl}}',
     '严格按以下流程执行：',
-    '1. {{tctl}} show {{task_id}} —— 重点阅读你上次交付/提问后用户新写的评论（答复或验收意见；images 字段是图片绝对路径，用读图工具查看）',
-    '2. 若主目录存在 .taskpin/TASKBOARD_RULES.md，按需参考；项目记忆见下方「项目记忆」节，需要更多历史细节时用 {{tctl}} memory search 检索',
+    '1. {{tctl}} show --compact {{task_id}} —— 重点阅读你上次交付/提问后用户新写的评论（答复或验收意见；images 字段是图片绝对路径，用读图工具查看）。--compact 会折叠早期评论并剔除 [runner] 进程记录以节省上下文；确需全文时去掉 --compact 重读',
+    '2. 若主目录存在 .taskpin/TASKBOARD_RULES.md，按需参考；项目记忆在首轮执行时已注入（本会话上下文中已有，续跑不再重复注入），需要更多历史细节时用 {{tctl}} memory search 检索',
     '3. 按答复/意见继续修改，并运行相关测试自验证；开发类任务对照描述中的「验收标准」逐条验证；标准仍缺失时不要猜：comment（body 以 [提问] 开头，给出验收标准草案）后 update --status blocked 等用户确认；开工确认同样适用：用户尚未明确说过「开工」（描述或任一用户评论含「开工」二字）时不要实现，comment（body 以 [提问] 开头，概述实现计划请用户回复「开工」）后 update --status blocked 等确认',
     "4. {{tctl}} comment {{task_id}} --author agent --body '<本轮变更摘要、验证结果、验收标准逐项核对、遗留疑点>'",
     '5. {{tctl}} update {{task_id}} --status in_review --if-version <当前 version>',
     '',
     '仍有需要用户决策的问题：comment（body 以 [提问] 开头，列出问题和可选方案）后 update --status blocked 等待答复，不要猜测。',
     '禁止将任务置为 done（done 只能由用户验收）。',
+    '沟通语言：所有写回看板的内容（评论、描述重写、[提问]）一律使用中文（代码、命令、标识符除外）。',
   ].join('\n'),
   qa: [
     '你是看板任务 #{{task_id}} 的问答 Agent：只讨论不实现（不改代码、不跑测试、不动项目文件，唯一允许的写操作见第 4 步）。看板 CLI：{{tctl}}',
@@ -261,9 +275,11 @@ export const PROMPT_DEFAULTS = {
     "4. 讨论充分后收尾：把结论结构化写回任务描述——{{tctl}} update {{task_id}} --if-version <当前 version> --desc '<重写后的描述，含 ## 需求 / ## 目标 / ## 规则与约束 / ## 验收标准（开发类任务必须有；给不出就先回第 3 步给草案问用户）>'；用户定下的跨任务规则可追加到主目录 .taskpin/TASKBOARD_RULES.md；收尾时提示用户：回复「开工」即启动实现（开发类任务未明确说「开工」不会动工）",
     "5. {{tctl}} comment {{task_id}} --author agent --body '<问答结论摘要>'",
     '6. 流转任务：未成熟回 backlog，已就绪进 todo，阻塞已解进 todo（{{tctl}} update --status backlog|todo --if-version <当前 version>）。禁止置 in_progress / in_review / done',
+    '沟通语言：所有写回看板的内容（评论、描述重写、[提问]）一律使用中文（代码、命令、标识符除外）。',
   ].join('\n'),
   // 融合模式（merge）：把多个源任务「合并+融合」成草案任务 #{{task_id}}。
-  // 类似 qa 不自动流转状态、不实现需求本身，只产出融合后的描述；确认/放弃由用户在草案详情点按钮。
+  // 执行即进「进行中」（同 execute 自动认领），只产出融合后的描述，收尾交付待验收；
+  // 确认/放弃是用户的隐式信号：对草案发起执行=确认（源任务自动取消），取消草案=放弃（源任务保留）。
   merge: [
     '你是看板任务融合 Agent，负责把多个源任务「合并+融合」成草案任务 #{{task_id}}。看板 CLI：{{tctl}}',
     '',
@@ -283,10 +299,12 @@ export const PROMPT_DEFAULTS = {
     '   ## 融合说明 —— 哪些部分被合并去重、哪些方案有矛盾、取了哪个舍了哪个、理由（用户据此验收融合质量）',
     '   ## 验收标准 —— 各源任务的验收标准逐条保留（标注来自哪个任务），外加融合后的整体标准；一条都不许丢',
     "6. {{tctl}} comment {{task_id}} --author agent --body '<融合摘要：融合思路、主要取舍、遗留疑点>'",
-    '7. {{tctl}} update {{task_id}} --status todo --if-version <当前 version>',
+    '7. {{tctl}} update {{task_id}} --status in_review --if-version <当前 version>（交付融合结果，等用户验收）',
     '',
-    '不要修改任何源任务（它们保持原状，用户在草案详情确认合并后才自动取消）。不要实现需求本身——你只负责融合出方案描述。',
-    '禁止将任务置为 in_progress / in_review / done。',
+    '不要修改任何源任务。不要实现需求本身——你只负责融合出方案描述。',
+    '用户接下来的动作语义：对草案发起执行 = 确认合并（源任务自动取消，无需你操作）；取消草案 = 放弃合并（源任务保留）。',
+    '禁止将任务置为 done（done 只能由用户验收）。',
+    '沟通语言：所有写回看板的内容（评论、描述重写、[提问]）一律使用中文（代码、命令、标识符除外）。',
   ].join('\n'),
 };
 
@@ -311,6 +329,7 @@ export const AUTO_CLAIM_PROMPT = [
   '铁律：',
   '- 一次只认领一个任务；永远不要置 done（done 只能由用户验收，系统也会拒绝）',
   '- 更新必须带 --if-version；VERSION_CONFLICT 时重新 show 取最新 version 再重试，连续冲突则放弃并 comment 说明',
+  '- 沟通语言：所有写回看板的内容（评论、描述重写、[提问]）一律使用中文（代码、命令、标识符除外）',
 ].join('\n');
 
 // 模板里必须保留的占位符（否则 agent 拿不到任务 id 和 CLI 路径）
@@ -360,15 +379,15 @@ function buildPrompt(task, projectPaths, { resume, mode, templates, agent, memor
   const withMemory = memorySection ? `${prompt}\n\n${memorySection}` : prompt;
   // dsh 沙箱内 taskctl 直写看板数据库会被权限拦截；dsh-taskpin 插件工具走 HTTP 不受限
   if (agent === 'dsh') {
-    return `${withMemory}\n\n环境提示：你运行在 DeepSeek Harness 中，已内置 taskboard_show / taskboard_comment / taskboard_transition 三个原生工具——回写看板（读任务/发评论/流转状态）优先用工具而不是 taskctl CLI。`;
+    return `${withMemory}\n\n环境提示：你运行在 DeepSeek Harness 中，已内置 taskboard_show / taskboard_comment / taskboard_update / taskboard_transition 四个原生工具——回写看板（读任务/发评论/改描述/流转状态）优先用工具而不是 taskctl CLI。taskboard_show 默认 compact 折叠早期评论省 token，确需全文再传 compact=false。`;
   }
   return withMemory;
 }
 
-export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
+export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGraceMs = 10_000, reapPollMs = 2_000 } = {}) {
   const runs = new Map(); // taskId -> {task_id, agent, pid, started_at, proc, output}
 
-  function publicRun({ proc, output, ...pub }) {
+  function publicRun({ proc, output, watcher, ...pub }) {
     return { ...pub, output_tail: output.trim().split('\n').slice(-5).join('\n') };
   }
 
@@ -380,7 +399,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
   function output(taskId) {
     const run = runs.get(taskId);
     if (!run) return null;
-    const { proc, ...pub } = run;
+    const { proc, watcher, ...pub } = run;
     return { ...pub };
   }
 
@@ -388,7 +407,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     if (!AGENT_NAMES.includes(agent)) {
       throw new DbError('VALIDATION', `unknown agent: ${agent} (${AGENT_NAMES.join('|')})`);
     }
-    // execMode：execute=实现任务（执行即进进行中）；qa=问答、merge=融合（只讨论/重写描述，不自动流转状态）
+    // execMode：execute=实现任务（执行即进进行中）；merge=融合（同样进进行中，只重写草案描述）；qa=问答（只讨论，不自动流转状态）
     const execMode = options.mode ?? 'execute';
     if (!['execute', 'qa', 'merge'].includes(execMode)) {
       throw new DbError('VALIDATION', `unknown mode: ${execMode} (execute|qa|merge)`);
@@ -404,18 +423,24 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     if (task.status === 'done' || task.status === 'canceled') {
       throw new DbError('INVALID_TRANSITION', `task ${taskId} is ${task.status}`);
     }
-    if (execMode === 'qa' || execMode === 'merge') {
-      // 问答/融合只允许在 待规划/待办/阻塞 发起；状态保持不动（不占「进行中」）
+    if (execMode === 'qa') {
+      // 问答只允许在 待规划/待办/阻塞 发起；状态保持不动（不占「进行中」）
       if (!['backlog', 'todo', 'blocked'].includes(task.status)) {
-        throw new DbError('INVALID_TRANSITION', `task ${taskId} is ${task.status}；问答/融合仅支持待规划/待办/阻塞`, { current: task });
-      }
-      // 融合模式校验草案身份：必须有 merged_from 源任务清单
-      if (execMode === 'merge' && !task.merged_from) {
-        throw new DbError('VALIDATION', `task ${taskId} 不是融合草案（无 merged_from）`, { current: task });
+        throw new DbError('INVALID_TRANSITION', `task ${taskId} is ${task.status}；问答仅支持待规划/待办/阻塞`, { current: task });
       }
     } else {
-      // 执行即进「进行中」：卡片位置同步反映后台执行。backlog 先排进 todo，todo 原子认领，
-      // blocked（已答复直接执行）/ in_review（打回重做）直接流转
+      if (execMode === 'merge') {
+        // 融合模式校验草案身份：必须有 merged_from 源任务清单
+        if (!task.merged_from) {
+          throw new DbError('VALIDATION', `task ${taskId} 不是融合草案（无 merged_from）`, { current: task });
+        }
+      } else if (task.merged_from) {
+        // 对融合草案发起执行 = 隐式确认合并：先取消源任务、清 merged_from（version 变了抛 409 草案过期，不启动执行）
+        confirmMerge(db, taskId);
+        task = getTask(db, taskId);
+      }
+      // 执行/融合即进「进行中」：卡片位置同步反映后台执行。backlog 先排进 todo，todo 原子认领，
+      // blocked（已答复直接执行）/ in_review（打回重做/验收融合结果后继续）直接流转
       if (task.status === 'backlog') {
         updateTask(db, taskId, { version: task.version, status: 'todo' });
         task = getTask(db, taskId);
@@ -447,7 +472,8 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
         mode: execMode,
         agent,
         templates: { new: settings.prompt_new, resume: settings.prompt_resume, qa: settings.prompt_qa, merge: settings.prompt_merge }, // 设置页的覆盖模板
-        memorySection: buildMemorySection(db, task.project_id, task),
+        // 同 agent 续跑不注入项目记忆：首轮已注入、原会话上下文里已有，重复注入纯烧 token
+        memorySection: resumeId ? null : buildMemorySection(db, task.project_id, task),
       });
       const { cmd, args, env } = buildCommand(agent, prompt, cwd, dbDir, { ...options, resumeId });
 
@@ -457,7 +483,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
         const cur = getTask(db, taskId);
         if (cur.status === 'in_progress') {
           updateTask(db, taskId, { version: cur.version, status: 'backlog' });
-          addComment(db, taskId, { author: 'user', body: `执行启动失败，任务回到「待规划」（可重新执行）：${err.message}` });
+          addComment(db, taskId, { author: 'system', body: `执行启动失败，任务回到「待规划」（可重新执行）：${err.message}` });
         }
       } catch { /* 任务可能已被删除 */ }
       throw err;
@@ -465,6 +491,27 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     const mode = [execMode === 'qa' ? '问答' : execMode === 'merge' ? '融合' : null, options.model, options.effort, options.permission, resumeId ? '续跑' : null].filter(Boolean).join(' · ');
     const run = { task_id: taskId, agent, mode, pid: proc.pid, started_at: new Date().toISOString(), proc, output: '', sessionId: null, stopping: false };
     runs.set(taskId, run);
+    // 残留进程超时自动回收（execute/merge 模式）：任务已离开「进行中」（交付待验收/提问进阻塞等）
+    // 但进程迟迟不退（kimi 长会话挂死实测 22h，#83）——宽限 reapGraceMs 后按用户手动停止同等
+    // 语义 SIGTERM（stopping=true，finish 不打「异常退出」标记）。qa 模式任务本就不进
+    // 「进行中」，不能套用此判定（否则会把整个问答执行误杀）
+    if (execMode !== 'qa') {
+      const watcher = setInterval(() => {
+        let cur;
+        try { cur = getTask(db, taskId); } catch { return; } // 任务被删则等进程自己退
+        if (cur.status === 'in_progress') { run.reapSince = null; return; } // 仍在执行，不打扰
+        if (!run.reapSince) { run.reapSince = Date.now(); return; } // 刚离开进行中，开始计宽限
+        if (run.stopping || Date.now() - run.reapSince < reapGraceMs) return;
+        run.stopping = true; // 自动回收等同手动停止：不打失败标记
+        try {
+          addComment(db, taskId, { author: 'system', body: `任务已是「${cur.status}」，但执行进程（${agent} pid ${proc.pid}）超过 ${Math.round(reapGraceMs / 1000)}s 宽限期仍未退出，已超时自动回收（SIGTERM，按手动停止处理）` });
+        } catch { /* 任务可能已被删除 */ }
+        run.proc.kill('SIGTERM'); // exit 事件触发 finish 清理
+        broadcast();
+      }, reapPollMs);
+      watcher.unref?.();
+      run.watcher = watcher;
+    }
     // 新执行开始：清除上一次的异常退出标记
     try { setTaskLastRun(db, taskId, null); } catch { /* 任务可能已被删除 */ }
     // 记录本次选用的模型/思考/权限（按任务记忆：执行弹框回填 + 卡片展示「上一次」）
@@ -496,6 +543,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     const run = runs.get(taskId);
     if (!run) return;
     runs.delete(taskId);
+    clearInterval(run.watcher); // 自动回收的轮询随 run 一并清理
     // 记录 CLI 会话 id（带 agent 前缀），同 agent 打回重做时续跑
     if (run.sessionId) {
       // reasonix 的 --resume 要会话文件完整路径，按 session_id 定位；找不到就不存（靠评论继承）
@@ -511,9 +559,11 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     const ok = !err && (okByResult || code === 0);
     const status = err
       ? `启动失败：${err.message}`
-      : ok
-        ? `正常结束${okByResult && code !== 0 ? `（结果行 success，忽略进程退出码 ${code}）` : ''}`
-        : `异常退出（码 ${code}）`;
+      : run.stopping
+        ? '已停止（SIGTERM）'
+        : ok
+          ? `正常结束${okByResult && code !== 0 ? `（结果行 success，忽略进程退出码 ${code}）` : ''}`
+          : `异常退出（码 ${code}）`;
     // 解析本次输出的上下文用量，存 tasks.usage（kimi 无用量输出则保持不变）
     const usage = parseUsage(run.agent, run.output);
     if (usage) {
@@ -521,7 +571,9 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
         setTaskUsage(db, taskId, JSON.stringify({ agent: run.agent, ...usage, at: new Date().toISOString() }));
       } catch { /* 任务可能已被删除 */ }
     }
-    let tail = run.output.trim().split('\n').slice(-8).join('\n');
+    let tail = run.output.trim().split('\n')
+      .filter((l) => !l.startsWith('dsh-usage: ')) // 插件的用量汇报行进 tasks.usage，不进评论尾部
+      .slice(-3).join('\n');
     if (rxResult && typeof rxResult.result === 'string' && rxResult.result) {
       // reasonix 输出是 JSON 结果行，提取 result 文本避免评论里糊一整行 JSON
       tail = rxResult.result;
@@ -543,7 +595,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
       const task = getTask(db, taskId);
       if (task.status === 'in_progress') {
         updateTask(db, taskId, { version: task.version, status: 'backlog' });
-        addComment(db, taskId, { author: 'user', body: '执行进程已退出，任务回到「待规划」（可重新执行）' });
+        addComment(db, taskId, { author: 'system', body: '执行进程已退出，任务回到「待规划」（可重新执行）' });
       }
     } catch { /* 任务可能已被删除 */ }
     broadcast();
@@ -559,7 +611,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
       const task = getTask(db, taskId);
       if (task.status === 'in_progress') {
         updateTask(db, taskId, { version: task.version, status: 'backlog' });
-        addComment(db, taskId, { author: 'user', body: '已停止执行，任务回到「待规划」' });
+        addComment(db, taskId, { author: 'system', body: '已停止执行，任务回到「待规划」' });
       }
     } catch { /* 任务可能已被删除 */ }
     run.proc.kill('SIGTERM'); // exit 事件触发 finish 清理
@@ -577,7 +629,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn }) {
     for (const t of stale) {
       try {
         updateTask(db, t.id, { version: t.version, status: 'backlog' });
-        addComment(db, t.id, { author: 'user', body: '执行进程已中断（服务重启或进程失联），任务从「进行中」回到「待规划」，可重新执行' });
+        addComment(db, t.id, { author: 'system', body: '执行进程已中断（服务重启或进程失联），任务从「进行中」回到「待规划」，可重新执行' });
       } catch (err) {
         console.error(`[runner] 回收残留任务 #${t.id} 失败: ${err.message}`);
       }

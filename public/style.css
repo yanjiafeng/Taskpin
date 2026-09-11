@@ -819,6 +819,14 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 .comment .who .author { font-weight: 600; font-size: 12.5px; font-family: inherit; }
 .comment .who .author.agent { color: #2b6a8f; }
 .comment .who .author.user { color: var(--ink); }
+.comment .who .author.system { color: var(--ink3); font-weight: 500; }
+/* 系统通知评论（自动回收、状态回退、合并互链）：弱化显示，不参与「最新一轮」边界 */
+.comment.from-system .body {
+  background: rgba(122, 84, 50, 0.06);
+  border-style: dashed;
+  color: var(--ink2);
+  font-size: 12.5px;
+}
 .comment .body {
   white-space: pre-wrap;
   overflow-wrap: break-word;

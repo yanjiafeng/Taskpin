@@ -2,7 +2,7 @@
 import {
   listProjects, createProject, updateProject, deleteProject, listTasks, getTaskWithComments,
   createTask, updateTask, claimTask, addComment, deleteTasks, getSettings, updateSettings,
-  saveAttachments, mergeTasks, confirmMerge, cancelMerge, DbError,
+  saveAttachments, mergeTasks, confirmMerge, cancelMerge, compactComments, DbError,
 } from './db.mjs';
 import { PROMPT_DEFAULTS, AUTO_CLAIM_PROMPT, getAgentOptions } from './runner.mjs';
 import { readFile } from 'node:fs/promises';
@@ -198,8 +198,8 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
       }
 
       // 合并融合第一步（出草案）：校验（2~5 个、同项目、非已取消/进行中）→ 建 backlog 草案（merged_from
-      // 记录源任务 id+version）→ 自动以 merge 模式发起融合执行。执行启动失败不阻断（草案已建好，
-      // 可稍后从详情抽屉手动执行）；run 为 null 时前端据此提示手动发起。
+      // 记录源任务 id+version）→ 自动以 merge 模式发起融合执行（会把草案认领进「进行中」）。执行启动失败
+      // 不阻断（草案已建好，可稍后从详情抽屉手动执行）；run 为 null 时前端据此提示手动发起。
       if (req.method === 'POST' && url.pathname === '/api/tasks/merge') {
         const body = await readBody(req);
         const draft = mergeTasks(db, body.ids);
@@ -219,7 +219,10 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
         const id = Number(m[1]);
         const sub = m[2];
         if (req.method === 'GET' && !sub) {
-          return sendJson(res, 200, getTaskWithComments(db, id));
+          const task = getTaskWithComments(db, id);
+          // ?compact=1：dsh 插件等读任务继承记忆时省 token（与 taskctl show --compact 同逻辑）
+          if (url.searchParams.get('compact') === '1') task.comments = compactComments(task.comments);
+          return sendJson(res, 200, task);
         }
         if (req.method === 'DELETE' && !sub) {
           const result = deleteTasks(db, [id]);
@@ -265,17 +268,21 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
         if (req.method === 'POST' && sub === '/comments') {
           const body = await readBody(req);
           const images = saveAttachments(attachmentsDir, id, body.images);
-          const comment = addComment(db, id, { author: body.author ?? 'user', body: body.body, images });
+          // author 外部入口只放行 user/agent；system 是服务端内部通知专用，外部伪造一律降级为 user
+          const author = ['user', 'agent'].includes(body.author) ? body.author : 'user';
+          const comment = addComment(db, id, { author, body: body.body, images });
           broadcast('tasks');
           return sendJson(res, 201, comment);
         }
-        // 合并融合第二步：确认生效（源任务 version 校验 → 同事务置已取消 + 互链评论）
+        // 合并融合第二步（显式快捷操作）：确认生效（源任务 version 校验 → 同事务置已取消 + 互链评论）。
+        // 隐式确认：对草案发起 execute 执行时由 runner 自动调用 confirmMerge
         if (req.method === 'POST' && sub === '/merge-confirm') {
           const task = confirmMerge(db, id);
           broadcast();
           return sendJson(res, 200, task);
         }
-        // 合并融合第二步：放弃（草案置已取消，源任务不受影响）
+        // 合并融合第二步（显式快捷操作）：放弃（草案置已取消，源任务不受影响）。
+        // 隐式放弃：任意入口把草案置 canceled 都会触发 updateTask 的放弃钩子，语义相同
         if (req.method === 'POST' && sub === '/merge-cancel') {
           const task = cancelMerge(db, id);
           broadcast();

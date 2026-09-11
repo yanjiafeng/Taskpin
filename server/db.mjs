@@ -482,15 +482,32 @@ export function updateTask(db, id, patch, { by = 'agent' } = {}) {
   if (fields.priority && !PRIORITIES.includes(fields.priority)) {
     throw new DbError('VALIDATION', `invalid priority: ${fields.priority}`);
   }
-  const sets = ['version = version + 1', 'updated_at = ?'];
-  const args = [now()];
-  for (const [k, v] of Object.entries(fields)) {
-    sets.push(`${k} = ?`);
-    args.push(v);
+  // 取消融合草案 = 放弃合并（隐式信号）：merged_from 非空的任务被取消时，清 merged_from 并互链评论，
+  // 源任务保持原状。用 SAVEPOINT 保证这组写入同生共死（SAVEPOINT 可嵌套，confirmMerge 的事务里调 updateTask 也安全）。
+  const abandonMerge = fields.status === 'canceled' && task.status !== 'canceled' ? parseMergedFrom(task) : null;
+  if (abandonMerge) db.exec('SAVEPOINT merge_abandon');
+  try {
+    const sets = ['version = version + 1', 'updated_at = ?'];
+    const args = [now()];
+    for (const [k, v] of Object.entries(fields)) {
+      sets.push(`${k} = ?`);
+      args.push(v);
+    }
+    args.push(id, task.version);
+    const r = db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND version = ?`).run(...args);
+    if (r.changes === 0) throw new DbError('VERSION_CONFLICT', `task ${id} version conflict`, { current: getTask(db, id) });
+    if (abandonMerge) {
+      db.prepare('UPDATE tasks SET merged_from = NULL WHERE id = ?').run(id);
+      addComment(db, id, { author: 'system', body: '合并已放弃：本草案取消，源任务不受影响' });
+      for (const { id: srcId } of abandonMerge) {
+        try { addComment(db, srcId, { author: 'system', body: `融合草案 #${id} 已放弃，本任务保持原状` }); } catch { /* 源任务可能已被删除 */ }
+      }
+      db.exec('RELEASE merge_abandon');
+    }
+  } catch (err) {
+    if (abandonMerge) { try { db.exec('ROLLBACK TO merge_abandon'); db.exec('RELEASE merge_abandon'); } catch { /* 回滚失败则原样抛错 */ } }
+    throw err;
   }
-  args.push(id, task.version);
-  const r = db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND version = ?`).run(...args);
-  if (r.changes === 0) throw new DbError('VERSION_CONFLICT', `task ${id} version conflict`, { current: getTask(db, id) });
   const updated = getTask(db, id);
   // 验收进入 done：整理一条结构化项目记忆（失败不阻断流转）
   if (fields.status === 'done' && task.status !== 'done') {
@@ -609,10 +626,10 @@ export function mergeTasks(db, ids) {
     ).run(pid, title, description, priority, JSON.stringify(tags), mergedFrom, ts, ts);
     const draftId = Number(r.lastInsertRowid);
     for (const t of sources) {
-      addComment(db, t.id, { author: 'user', body: `已创建融合草案 #${draftId}（与本任务一同合并融合）；你确认草案后本任务才会取消，此前保持原状` });
+      addComment(db, t.id, { author: 'system', body: `已创建融合草案 #${draftId}（与本任务一同合并融合）；你确认草案后本任务才会取消，此前保持原状` });
     }
     addComment(db, draftId, {
-      author: 'user',
+      author: 'system',
       body: `由 ${sources.map((t) => `#${t.id}`).join(' ')} 合并而来。确认合并后源任务将全部取消；放弃则删除本草稿，源任务不受影响。`,
     });
     db.exec('COMMIT');
@@ -643,10 +660,10 @@ export function confirmMerge(db, draftId) {
     for (const { id } of mf) {
       const t = getTask(db, id);
       updateTask(db, id, { version: t.version, status: 'canceled' });
-      addComment(db, id, { author: 'user', body: `已合并进 #${draftId}（融合草案确认生效）` });
+      addComment(db, id, { author: 'system', body: `已合并进 #${draftId}（融合草案确认生效）` });
     }
     db.prepare('UPDATE tasks SET merged_from = NULL WHERE id = ?').run(draftId);
-    addComment(db, draftId, { author: 'user', body: `合并已生效：源任务 ${mf.map((s) => `#${s.id}`).join(' ')} 已取消` });
+    addComment(db, draftId, { author: 'system', body: `合并已生效：源任务 ${mf.map((s) => `#${s.id}`).join(' ')} 已取消` });
     db.exec('COMMIT');
   } catch (err) {
     db.exec('ROLLBACK');
@@ -655,31 +672,31 @@ export function confirmMerge(db, draftId) {
   return getTask(db, draftId);
 }
 
-// 第二步（放弃）：草案置已取消并清掉 merged_from，源任务不受影响（各留一条说明评论）。
+// 第二步（放弃，显式快捷操作）：草案置已取消。清 merged_from、互链评论、源任务保持原状
+// 由 updateTask 的「取消草案 = 放弃合并」钩子完成；任意入口取消草案（抽屉/拖拽/CLI）都会触发。
 export function cancelMerge(db, draftId) {
   const draft = getTask(db, draftId);
-  const mf = parseMergedFrom(draft);
-  if (!mf) throw new DbError('VALIDATION', `任务 #${draftId} 不是待确认的融合草案`);
+  if (!parseMergedFrom(draft)) throw new DbError('VALIDATION', `任务 #${draftId} 不是待确认的融合草案`);
   if (draft.status === 'canceled') {
     throw new DbError('INVALID_TRANSITION', `任务 #${draftId} 已是已取消状态`, { current: draft });
   }
-  db.exec('BEGIN');
-  try {
-    updateTask(db, draftId, { version: draft.version, status: 'canceled' });
-    db.prepare('UPDATE tasks SET merged_from = NULL WHERE id = ?').run(draftId);
-    addComment(db, draftId, { author: 'user', body: '合并已放弃：本草案取消，源任务不受影响' });
-    for (const { id } of mf) {
-      try { addComment(db, id, { author: 'user', body: `融合草案 #${draftId} 已放弃，本任务保持原状` }); } catch { /* 源任务可能已被删除 */ }
-    }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  updateTask(db, draftId, { version: draft.version, status: 'canceled' });
   return getTask(db, draftId);
 }
 
 // ---------- comments ----------
+
+// show --compact：给续跑的 agent 省 token——[runner] 进程记录不进入上下文；「最新一轮」（最后一次
+// 用户评论到末尾，与前端同逻辑）之前的早期评论折叠为前 keepTail 字符（需要全文时去掉 --compact 重读）
+export function compactComments(comments, { keepTail = 200 } = {}) {
+  const filtered = comments.filter((c) => !c.body.startsWith('[runner]'));
+  const lastUserIdx = filtered.reduce((acc, c, i) => (c.author === 'user' ? i : acc), -1);
+  const roundStart = lastUserIdx >= 0 ? lastUserIdx : Math.max(0, filtered.length - 1);
+  return filtered.map((c, i) => {
+    if (i >= roundStart || c.body.length <= keepTail) return c;
+    return { ...c, body: `${c.body.slice(0, keepTail)}…（早期评论已折叠，全文：show 不带 --compact）` };
+  });
+}
 
 // 评论附件：存 <db 同目录>/attachments/<taskId>/<文件>，comments.images 存相对路径 JSON。
 // agent 与看板同机运行，taskctl show 打印绝对路径，agent 可直接读图。
@@ -712,9 +729,12 @@ export function saveAttachments(dir, taskId, files) {
 }
 
 // images 为 saveAttachments 返回的相对路径数组；有图时 body 可为空
+// author 三种：user / agent / system。system 是服务端内部通知（自动回收、状态回退、合并互链等），
+// 外部入口（API/CLI）不允许伪造，只收 user/agent；「最新一轮」/答复模式/验收意见提取都以
+// author==='user' 为界，system 评论不会顶歪这些边界（这正是引入 system 的原因）
 export function addComment(db, taskId, { author = 'user', body, images = [] }) {
   if ((!body || !body.trim()) && images.length === 0) throw new DbError('VALIDATION', 'comment body is required');
-  if (!['user', 'agent'].includes(author)) throw new DbError('VALIDATION', `invalid author: ${author}`);
+  if (!['user', 'agent', 'system'].includes(author)) throw new DbError('VALIDATION', `invalid author: ${author}`);
   getTask(db, taskId);
   const ts = now();
   const r = db.prepare('INSERT INTO comments (task_id, author, body, images, created_at) VALUES (?, ?, ?, ?, ?)')

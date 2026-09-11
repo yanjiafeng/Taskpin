@@ -1,4 +1,6 @@
 // 看板前端：项目切换、列渲染、拖拽/按钮改状态、详情抽屉、SSE 实时刷新。
+import { fmtDateTime, fmtClock } from './timefmt.js';
+
 const COLUMNS = ['backlog', 'todo', 'in_progress', 'blocked', 'in_review', 'done'];
 // 状态元数据：label 用于展示，desc 为列头说明文字；颜色由 CSS 按 data-col/data-status 渲染
 const STATUS_META = {
@@ -604,7 +606,8 @@ function updateBatchBar() {
     : '合并融合成一个新需求：先出草案，确认后原任务才取消';
 }
 
-// 合并融合第一步：POST /api/tasks/merge 建草案 + 服务端自动发起融合执行；成功则退出多选并打开草案
+// 合并融合第一步：POST /api/tasks/merge 建草案 + 服务端自动发起融合执行；成功则退出多选。
+// 草案随融合执行进入「进行中」，看板上直接显示为执行中卡片，无需打开明细页
 async function submitMerge(btn) {
   const ids = [...state.selected].sort((a, b) => a - b);
   if (ids.length < 2 || ids.length > 5) return toast('合并融合需要勾选 2~5 个任务', 'error');
@@ -618,7 +621,6 @@ async function submitMerge(btn) {
       } else {
         toast(`融合草案 #${res.task.id} 已创建，融合执行中`);
       }
-      openDrawer(res.task.id);
     } catch (err) {
       toast(err.message, 'error');
       scheduleReload();
@@ -918,7 +920,7 @@ function dedupeDshTail(lines) {
 
 function formatRunOutput(agent, raw) {
   const lines = stripAnsi(raw).split('\n');
-  if (agent === 'dsh') return dedupeDshTail(lines).join('\n').trim();
+  if (agent === 'dsh') return dedupeDshTail(lines.filter((l) => !l.startsWith('dsh-usage: '))).join('\n').trim();
   if (agent !== 'reasonix') return lines.join('\n').trim();
   const out = [];
   for (const l of lines) {
@@ -1045,13 +1047,14 @@ function renderDrawer() {
   // 已取消任务的删除入口（替代原卡片上的 × 按钮）
   const delBtn = t.status === 'canceled'
     ? '<button class="btn danger" id="d-del">🗑 删除任务</button>' : '';
-  // 融合草案（merged_from 非空且未取消）：确认合并 / 放弃合并（两段式确认门的第二步）
+  // 融合草案（merged_from 非空且未取消）：确认/放弃大多走隐式信号——执行本任务=确认（源任务自动取消）、
+  // 取消本任务=放弃（源任务保留）；下面两个显式按钮是不执行/不动状态时的快捷操作
   let mergeDraftHtml = '';
   try {
     const mf = t.merged_from ? JSON.parse(t.merged_from) : null;
     if (Array.isArray(mf) && mf.length && t.status !== 'canceled') {
       mergeDraftHtml = `<div class="d-sec">合并融合</div>
-        <div class="settings-hint">本任务由 ${mf.map((s) => `#${s.id}`).join(' ')} 合并而来的草案。确认合并后源任务将全部取消（不可恢复）；放弃则本草稿取消，源任务不受影响。</div>
+        <div class="settings-hint">本任务由 ${mf.map((s) => `#${s.id}`).join(' ')} 合并而来的草案。验收融合结果后直接「▶ 执行」即确认合并（源任务自动取消，不可恢复）；觉得融合的不行就取消本任务，源任务自动保留。也可以手动：</div>
         <div class="row status-actions">
           <button class="btn primary" id="d-merge-confirm">✓ 确认合并</button>
           <button class="btn ghost" id="d-merge-cancel">✕ 放弃合并</button>
@@ -1092,8 +1095,8 @@ function renderDrawer() {
       return `<img class="comment-img" src="${src}" alt="附图" loading="lazy">`;
     }).join('');
     return `
-    <div class="comment${isQuestion ? ' question' : ''}${c.author === 'user' ? ' from-user' : ''}">
-      <div class="who"><span class="author ${esc(c.author)}">${c.author === 'agent' ? 'Agent' : '用户'}</span>${isQuestion ? '<span class="q-badge">等你答复</span>' : ''}<span>${esc(fmtLocal(c.created_at))}</span></div>
+    <div class="comment${isQuestion ? ' question' : ''}${c.author === 'user' ? ' from-user' : ''}${c.author === 'system' ? ' from-system' : ''}">
+      <div class="who"><span class="author ${esc(c.author)}">${c.author === 'agent' ? 'Agent' : c.author === 'system' ? '系统' : '用户'}</span>${isQuestion ? '<span class="q-badge">等你答复</span>' : ''}<span>${esc(fmtLocal(c.created_at))}</span></div>
       <div class="body">${md(c.body)}</div>
       ${imgs ? `<div class="comment-imgs">${imgs}</div>` : ''}
     </div>`;
@@ -1462,9 +1465,12 @@ function renderDrawer() {
         // 请求期间用户又打了字（值变了）则不动，保留新输入
         const cmt = $('#d-comment');
         if (cmt && cmt.value.trim() === body) cmt.value = '';
-        // 答复模式（有未答复的 [提问]）：评论提交后自动续跑——阻塞中的提问续跑执行，待规划/待办续跑问答
+        // 答复模式（有未答复的 [提问]）：评论提交后自动续跑——阻塞中的提问续跑执行，待规划/待办续跑问答。
+        // 融合草案（merged_from 非空）一律用 merge 模式续跑：走 execute 会触发隐式确认把源任务取消，
+        // 答复融合提问不等于确认合并
         if (showReply && body) {
-          const mode = ['backlog', 'todo'].includes(state.openTask.status) ? 'qa' : 'execute';
+          const mode = state.openTask.merged_from ? 'merge'
+            : ['backlog', 'todo'].includes(state.openTask.status) ? 'qa' : 'execute';
           const threadAgent = (state.openTask.thread_id || '').split(':')[0];
           const agent = state.settings.agents.includes(threadAgent) ? threadAgent : state.settings.agents[0];
           await api(`/api/tasks/${t.id}/execute`, { method: 'POST', body: { agent, mode } });
@@ -1712,7 +1718,9 @@ function quotaCard(name, inner) {
 // Kimi 额度：复刻官方「用量进度」布局（Code 用量百分比进度条 + 重置时间）
 function usageRow(label, used, limit, resetISO) {
   const pct = limit > 0 ? (used / limit) * 100 : 0;
-  const reset = resetISO ? `${resetISO.slice(5, 16).replace('T', ' ')} 后重置` : '';
+  // 接口给的是 UTC，按本机时区渲染（否则比北京时间少 8 小时）
+  const at = fmtDateTime(resetISO);
+  const reset = at ? `${at} 后重置` : '';
   return `
     <div class="usage-row">
       <div class="usage-label"><span>${label} <b>${pct.toFixed(2)}%</b></span><span class="usage-reset">${esc(reset)}</span></div>
@@ -1741,7 +1749,8 @@ function renderQuota(data) {
     ? quotaCard('Codex', `<div class="quota-main">${esc(c.balance)}</div><div class="quota-sub">${esc(c.currency || '')}${c.provider ? ` · ${esc(c.provider)}` : ''}</div>`)
     : quotaCard('Codex', `<div class="quota-err">${esc(c.error || '不可用')}</div>`));
   $('#quota-cards').innerHTML = cards.join('');
-  $('#quota-time').textContent = data.fetched_at ? `${data.fetched_at.slice(11, 19)} 更新` : '';
+  const updated = fmtClock(data.fetched_at);
+  $('#quota-time').textContent = updated ? `${updated} 更新` : '';
 }
 
 async function loadQuota(refresh = false) {
