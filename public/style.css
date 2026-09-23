@@ -1003,6 +1003,110 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
   line-height: 1;
   padding: 0;
 }
+/* 待发送条里的文件条目：与图片方图等高的横条小卡 */
+.file-thumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 56px;
+  max-width: 200px;
+  padding: 0 8px;
+  background: var(--paper-field);
+  border: 1px solid rgba(122, 84, 50, 0.3);
+  border-radius: 2px;
+}
+.file-thumb .file-ext { width: 30px; height: 30px; font-size: 8.5px; }
+.file-thumb .ft-meta { min-width: 0; display: flex; flex-direction: column; }
+.file-thumb .nm {
+  font-size: 11.5px;
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+.file-thumb .sz { font-size: 10px; color: var(--ink3); font-family: var(--mono); }
+.file-thumb.reading { border-style: dashed; }
+.file-thumb.reading .nm { color: var(--ink3); }
+
+/* 评论流里的文件附件：纸条文件卡（变体 A，docs/demos/comment-attachments.html） */
+.comment-files { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 340px;
+  padding: 7px 10px 7px 7px;
+  background: var(--paper-field);
+  border: 1px solid rgba(122, 84, 50, 0.3);
+  border-radius: 2px;
+  text-decoration: none;
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(60, 40, 20, 0.15);
+}
+.file-card:hover { background: rgba(255, 255, 255, 0.9); box-shadow: 0 2px 5px rgba(60, 40, 20, 0.25); }
+.file-card:focus-visible { outline: 2px solid var(--pin); outline-offset: 1px; }
+.file-ext {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  color: #fff;
+  text-transform: uppercase;
+  background: var(--ink2);
+}
+.file-ext.ext-pdf { background: #b3452e; }
+.file-ext.ext-doc { background: #2b6a8f; }
+.file-ext.ext-xls { background: #3d7a4f; }
+.file-ext.ext-ppt { background: #b3702e; }
+.file-ext.ext-md { background: #7a6a52; }
+.file-ext.ext-txt { background: #9a8a70; }
+.file-ext.ext-zip { background: #8a6d2a; }
+.file-meta { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.file-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-sub { font-size: 11px; color: var(--ink3); font-family: var(--mono); margin-top: 1px; }
+.file-dl { flex: none; color: var(--ink3); font-size: 14px; }
+.file-card:hover .file-dl { color: var(--pin); }
+
+/* 评论附件上传进度条（XHR upload.onprogress 驱动） */
+.upload-bar {
+  position: relative;
+  margin-top: 8px;
+  height: 18px;
+  background: var(--paper-field);
+  border: 1px solid rgba(122, 84, 50, 0.3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.upload-fill {
+  height: 100%;
+  width: 0;
+  background: repeating-linear-gradient(45deg, rgba(232, 163, 61, 0.55) 0 8px, rgba(232, 163, 61, 0.35) 8px 16px);
+  transition: width .15s linear;
+}
+.upload-pct {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--ink2);
+}
 
 /* ---------- 弹窗：纸张卡片 ---------- */
 .modal, .dlg, .run-sheet {

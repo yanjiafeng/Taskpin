@@ -3,10 +3,27 @@ import {
   listProjects, createProject, updateProject, deleteProject, listTasks, getTaskWithComments,
   createTask, updateTask, claimTask, addComment, deleteTasks, getSettings, updateSettings,
   saveAttachments, mergeTasks, confirmMerge, cancelMerge, compactComments, DbError,
+  ATTACHMENT_MIME_EXT,
 } from './db.mjs';
 import { PROMPT_DEFAULTS, AUTO_CLAIM_PROMPT, getAgentOptions } from './runner.mjs';
 import { readFile } from 'node:fs/promises';
 import { join, normalize } from 'node:path';
+
+// 附件路由的 ext→mime（由 db.mjs 的白名单反推，白名单改动只动 db.mjs 一处）
+const ATTACHMENT_EXT_MIME = Object.fromEntries(
+  Object.entries(ATTACHMENT_MIME_EXT).map(([mime, ext]) => [ext, mime]),
+);
+
+// 从评论记录里找回附件原始文件名（下载回显用）；历史字符串条目没有名字，返回 null
+function findAttachmentName(db, taskId, rel) {
+  const rows = db.prepare('SELECT images FROM comments WHERE task_id = ?').all(taskId);
+  for (const r of rows) {
+    for (const it of JSON.parse(r.images || '[]')) {
+      if (typeof it === 'object' && it?.path === rel && it.name) return it.name;
+    }
+  }
+  return null;
+}
 
 const ERROR_STATUS = {
   NOT_FOUND: 404,
@@ -38,8 +55,8 @@ function readBody(req) {
     let data = '';
     req.on('data', (chunk) => {
       data += chunk;
-      // 上限 60MB：评论图片走 base64 dataURL，6 张 8MB 图编码后约 43MB
-      if (data.length > 60_000_000) reject(new DbError('VALIDATION', 'request body too large'));
+      // 上限 130MB：评论附件走 base64 dataURL，6 个 15MB 文件编码后约 120MB
+      if (data.length > 130_000_000) reject(new DbError('VALIDATION', 'request body too large'));
     });
     req.on('end', () => {
       if (!data) return resolve({});
@@ -56,17 +73,23 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
     const pm = url.pathname.match(/^\/api\/projects\/(\d+)$/);
     const am = url.pathname.match(/^\/api\/attachments\/(\d+)\/([\w.-]+)$/);
     try {
-      // 评论图片附件（文件在 attachments/<taskId>/ 下，只允许该目录内的平文件名）
+      // 评论附件（文件在 attachments/<taskId>/ 下，只允许该目录内的平文件名）：
+      // 图片 inline 显示；非图片强制下载（Content-Disposition 带回原始文件名，也防内联执行）
       if (req.method === 'GET' && am) {
         const ext = am[2].split('.').pop().toLowerCase();
-        const type = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }[ext];
+        const type = ATTACHMENT_EXT_MIME[ext];
         const filePath = normalize(join(attachmentsDir, am[1], am[2]));
         if (!type || !filePath.startsWith(normalize(join(attachmentsDir, am[1])))) {
           return sendJson(res, 404, { error: { code: 'NOT_FOUND', message: 'attachment not found' } });
         }
         try {
           const data = await readFile(filePath);
-          res.writeHead(200, { 'content-type': type, 'cache-control': 'immutable, max-age=31536000' });
+          const headers = { 'content-type': type, 'cache-control': 'immutable, max-age=31536000' };
+          if (!type.startsWith('image/')) {
+            const name = findAttachmentName(db, am[1], `${am[1]}/${am[2]}`) || am[2];
+            headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(name)}`;
+          }
+          res.writeHead(200, headers);
           return res.end(data);
         } catch {
           return sendJson(res, 404, { error: { code: 'NOT_FOUND', message: 'attachment not found' } });

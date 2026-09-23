@@ -9,7 +9,7 @@ import {
   openDb, ensureDefaultProject, listProjects, createProject, updateProject, resolveMainDir,
   listTasks, getTask, getTaskWithComments, createTask, claimTask, updateTask, addComment, setTaskLastRun, setTaskUsage, setTaskExecOpts,
   normalizeTags, recentMemories, searchMemories, archiveProjectMemories,
-  mergeTasks, confirmMerge, cancelMerge, compactComments, DbError,
+  mergeTasks, confirmMerge, cancelMerge, compactComments, DbError, saveAttachments,
 } from '../server/db.mjs';
 import { parseUsage } from '../server/runner.mjs';
 
@@ -600,4 +600,30 @@ test('compactComments：剔除 [runner]、折叠最新一轮之前的早期评�
   ]);
   assert.ok(noUser[0].body.includes('早期评论已折叠'));
   assert.equal(noUser[1].body, 'b'.repeat(300));
+});
+
+test('saveAttachments：图片/文件白名单、大小上限、原始文件名消毒', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tb-att-db-'));
+  try {
+    const png = { name: 'a.png', data: `data:image/png;base64,${Buffer.from('x').toString('base64')}` };
+    const pdf = { name: '../../恶意 名.pdf', data: `data:application/pdf;base64,${Buffer.from('y').toString('base64')}` };
+    const out = saveAttachments(dir, 7, [png, pdf]);
+    assert.equal(out.length, 2);
+    assert.equal(out[0].mime, 'image/png');
+    assert.equal(out[1].mime, 'application/pdf');
+    assert.equal(out[1].name, '恶意 名.pdf'); // 路径分隔被剥掉，原始名保留
+    assert.ok(existsSync(join(dir, out[0].path)));
+    // 白名单：可内联执行的 html/svg 不放行；md/txt/csv/zip 放行
+    assert.throws(() => saveAttachments(dir, 7, [{ data: 'data:text/html;base64,PGI+' }]), (e) => e.code === 'VALIDATION');
+    assert.throws(() => saveAttachments(dir, 7, [{ data: 'data:image/svg+xml;base64,PHN2Zz4=' }]), (e) => e.code === 'VALIDATION');
+    const md = saveAttachments(dir, 7, [{ name: 'n.md', data: 'data:text/markdown;base64,I2hp' }]);
+    assert.equal(md[0].mime, 'text/markdown');
+    // 数量上限 6
+    assert.throws(() => saveAttachments(dir, 7, Array(7).fill(png)), (e) => e.code === 'VALIDATION');
+    // 文件大小上限 15MB
+    const big = Buffer.alloc(15 * 1024 * 1024 + 1).toString('base64');
+    assert.throws(() => saveAttachments(dir, 7, [{ name: 'b.pdf', data: `data:application/pdf;base64,${big}` }]), (e) => e.code === 'VALIDATION');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

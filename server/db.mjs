@@ -698,33 +698,55 @@ export function compactComments(comments, { keepTail = 200 } = {}) {
   });
 }
 
-// 评论附件：存 <db 同目录>/attachments/<taskId>/<文件>，comments.images 存相对路径 JSON。
-// agent 与看板同机运行，taskctl show 打印绝对路径，agent 可直接读图。
+// 评论附件：存 <db 同目录>/attachments/<taskId>/<文件>，comments.images 存附件条目 JSON
+// （{path, name, size, mime}；历史数据为纯路径字符串，读取侧两种都要兼容）。
+// agent 与看板同机运行，taskctl show 打印绝对路径，agent 可直接读图/读文本类文件。
 export function attachmentsDir(dbPath) {
   return join(dirname(dbPath), 'attachments');
 }
 
 const IMAGE_MIME_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
-const MAX_IMAGES = 6;
+const FILE_MIME_EXT = {
+  'application/pdf': 'pdf',
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'text/markdown': 'md',
+  'text/plain': 'txt',
+  'text/csv': 'csv',
+  'application/zip': 'zip',
+};
+// 白名单不放行 html/svg 等可内联执行的类型；api.mjs 的附件路由据此反推 ext→mime
+export const ATTACHMENT_MIME_EXT = { ...IMAGE_MIME_EXT, ...FILE_MIME_EXT };
+const MAX_ATTACHMENTS = 6;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_BYTES = 15 * 1024 * 1024;
 
-// files: [{ name?, data }] —— data 为 dataURL（data:image/png;base64,...）。返回附件相对路径数组。
+// files: [{ name?, data }] —— data 为 dataURL。返回附件条目数组 {path, name, size, mime}。
 export function saveAttachments(dir, taskId, files) {
   if (!Array.isArray(files) || files.length === 0) return [];
-  if (files.length > MAX_IMAGES) throw new DbError('VALIDATION', `最多 ${MAX_IMAGES} 张图片`);
+  if (files.length > MAX_ATTACHMENTS) throw new DbError('VALIDATION', `最多 ${MAX_ATTACHMENTS} 个附件`);
   mkdirSync(join(dir, String(taskId)), { recursive: true });
   return files.map((f, i) => {
-    const m = /^data:(image\/[a-z]+);base64,(.+)$/s.exec(f?.data || '');
-    if (!m || !IMAGE_MIME_EXT[m[1]]) {
-      throw new DbError('VALIDATION', `第 ${i + 1} 张图片格式不支持（仅 png/jpg/gif/webp 的 dataURL）`);
+    const m = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,(.+)$/is.exec(f?.data || '');
+    const mime = m?.[1]?.toLowerCase();
+    if (!mime || !ATTACHMENT_MIME_EXT[mime]) {
+      throw new DbError('VALIDATION', `第 ${i + 1} 个附件格式不支持（图片 png/jpg/gif/webp；文件 pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv/zip）`);
     }
     const buf = Buffer.from(m[2], 'base64');
-    if (buf.length === 0 || buf.length > MAX_IMAGE_BYTES) {
-      throw new DbError('VALIDATION', `第 ${i + 1} 张图片大小超限（最大 ${MAX_IMAGE_BYTES / 1024 / 1024}MB）`);
+    const isImage = mime.startsWith('image/');
+    const limit = isImage ? MAX_IMAGE_BYTES : MAX_FILE_BYTES;
+    if (buf.length === 0 || buf.length > limit) {
+      throw new DbError('VALIDATION', `第 ${i + 1} 个附件大小超限（${isImage ? '图片' : '文件'}最大 ${limit / 1024 / 1024}MB）`);
     }
-    const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${IMAGE_MIME_EXT[m[1]]}`;
+    const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ATTACHMENT_MIME_EXT[mime]}`;
     writeFileSync(join(dir, String(taskId), name), buf);
-    return `${taskId}/${name}`;
+    // 原始文件名仅用于展示/下载回显，落盘仍用随机名；剥路径防注入，限长
+    const origName = String(f.name || '').split(/[\\/]/).pop().trim().slice(0, 120) || name;
+    return { path: `${taskId}/${name}`, name: origName, size: buf.length, mime };
   });
 }
 

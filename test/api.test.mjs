@@ -832,7 +832,7 @@ test('tunnel：启动、域名持久化、重生成、停止', async () => {
 });
 
 
-test('评论图片附件：粘贴上传、读取、校验', async () => {
+test('评论附件：粘贴上传、读取、校验（图片 + 文件）', async () => {
   const attDir = mkdtempSync(join(tmpdir(), 'tb-att-'));
   const app = createApp({ dbPath: ':memory:', attachmentsDir: attDir });
   const srv = app.server;
@@ -848,40 +848,56 @@ test('评论图片附件：粘贴上传、读取、校验', async () => {
   };
   // 1x1 透明 PNG
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const PDF = `data:application/pdf;base64,${Buffer.from('%PDF-1.4 fake').toString('base64')}`;
   try {
     const created = await rq('POST', '/api/tasks', { project_id: 1, title: '带图评论' });
     const tid = created.data.id;
 
-    // 一次评论多张图片（粘贴场景）
+    // 一次评论多张图片（粘贴场景）；附件条目为 {path, name, size, mime}
     const c = await rq('POST', `/api/tasks/${tid}/comments`, { author: 'user', body: '看这两张图', images: [{ data: PNG }, { data: PNG }] });
     assert.equal(c.status, 201);
     assert.equal(c.data.images.length, 2);
-    assert.ok(c.data.images[0].startsWith(`${tid}/`));
+    assert.ok(c.data.images[0].path.startsWith(`${tid}/`));
+    assert.equal(c.data.images[0].mime, 'image/png');
+    assert.ok(c.data.images[0].size > 0);
 
     // 空 body + 纯图片也可以
     const imgOnly = await rq('POST', `/api/tasks/${tid}/comments`, { author: 'user', images: [{ data: PNG }] });
     assert.equal(imgOnly.status, 201);
 
-    // 详情里评论带 images，附件可按路径取回且 content-type 正确
+    // 详情里评论带 images，图片附件可按路径取回且 content-type 正确（inline，无下载头）
     const detail = await rq('GET', `/api/tasks/${tid}`);
     const withImgs = detail.data.comments.filter((x) => x.images.length);
     assert.equal(withImgs.length, 2);
-    const att = await fetch(`${b}/api/attachments/${withImgs[0].images[0]}`);
+    const att = await fetch(`${b}/api/attachments/${withImgs[0].images[0].path}`);
     assert.equal(att.status, 200);
     assert.equal(att.headers.get('content-type'), 'image/png');
+    assert.equal(att.headers.get('content-disposition'), null);
     assert.ok((await att.arrayBuffer()).byteLength > 0);
+
+    // 文件附件（pdf）：携带原始文件名；取回时 content-type 正确且强制下载、回显原始文件名
+    const fc = await rq('POST', `/api/tasks/${tid}/comments`, { author: 'user', body: '需求文档', images: [{ name: '需求说明 v2.pdf', data: PDF }] });
+    assert.equal(fc.status, 201);
+    assert.equal(fc.data.images[0].mime, 'application/pdf');
+    assert.equal(fc.data.images[0].name, '需求说明 v2.pdf');
+    const fatt = await fetch(`${b}/api/attachments/${fc.data.images[0].path}`);
+    assert.equal(fatt.status, 200);
+    assert.equal(fatt.headers.get('content-type'), 'application/pdf');
+    const cd = fatt.headers.get('content-disposition');
+    assert.ok(cd.startsWith('attachment;'));
+    assert.ok(decodeURIComponent(cd).includes('需求说明 v2.pdf'));
 
     // 路径穿越被拒
     const traversal = await fetch(`${b}/api/attachments/${tid}/..%2F..%2Ftaskboard.sqlite`);
     assert.equal(traversal.status, 404);
 
-    // 非图片 dataURL -> 400；空评论（无文无图）-> 400
-    const bad = await rq('POST', `/api/tasks/${tid}/comments`, { author: 'user', body: 'x', images: [{ data: 'data:text/plain;base64,aGk=' }] });
+    // 可内联执行的类型（html）-> 400；空评论（无文无附件）-> 400
+    const bad = await rq('POST', `/api/tasks/${tid}/comments`, { author: 'user', body: 'x', images: [{ data: 'data:text/html;base64,PGI+eDwvYj4=' }] });
     assert.equal(bad.status, 400);
     const empty = await rq('POST', `/api/tasks/${tid}/comments`, { author: 'user', body: '' });
     assert.equal(empty.status, 400);
 
-    // 超过 6 张 -> 400
+    // 超过 6 个 -> 400
     const tooMany = await rq('POST', `/api/tasks/${tid}/comments`, { author: 'user', body: 'x', images: Array(7).fill({ data: PNG }) });
     assert.equal(tooMany.status, 400);
   } finally {

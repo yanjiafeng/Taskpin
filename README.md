@@ -59,7 +59,7 @@ npm run dev          # 开发模式：node --watch，改动服务端代码自动
 - 删除：**只能删「已取消」的任务**。单个删除在任务详情（抽屉）的「🗑 删除任务」按钮（有确认）；「已取消」列头的 🗑 按钮批量删除当前视图下全部已取消任务。对应 API：`DELETE /api/tasks/:id`、`POST /api/tasks/batch-delete {ids}`（事务，混着未取消任务会整体失败）。
 - 状态机：`待规划 → 待办 → 进行中 → 待验收 → 已完成`；「进行中」可进「阻塞」（答复后回「待办」继续），各活动状态可进「已取消」（终态）。进「已完成」必须由用户验收，Agent 无法自判完成；「待验收」可回退「进行中」（打回重做）或「待办」「待规划」（重新规划）；「已完成」允许回退到「待办」「待规划」或取消。
 - 数据默认在 `~/.codex-task-dashiboard/taskboard.sqlite`（`TASKBOARD_DB` 可覆盖）。
-- **评论可附图**：在评论框直接粘贴截图，或点 📎 从相册/文件选择（最多 6 张、单张 ≤8MB，png/jpg/gif/webp）。图片存数据库同目录的 `attachments/`，评论里显示缩略图（点击看原图）；Agent 执行时会从 `taskctl show` 拿到图片的本地绝对路径，可直接读图。
+- **评论可附图片/文件**：在评论框直接粘贴截图，或点 📎 选择图片/文件（合计 ≤6 个；图片 png/jpg/gif/webp ≤8MB，文件 pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv/zip ≤15MB）。附件存数据库同目录的 `attachments/`；图片在评论里显示缩略图（点击看原图），文件显示为文件卡（文件名/大小/类型，点击下载、下载文件名 = 原始文件名）；提交带附件的评论有实时上传进度条。Agent 执行时会从 `taskctl show` 拿到附件的本地绝对路径，可直接读图/读文本类文件。
 
 ## 手机访问（内网穿透）
 
@@ -126,7 +126,7 @@ taskctl list --status todo
 taskctl show 3                              # 详情 + 全部评论（--compact：剔除 [runner] 评论、折叠早期评论，续跑省 token）
 taskctl claim 3                             # 原子认领 todo -> in_progress
 taskctl comment 3 --body "完成，测试通过" --author agent
-taskctl comment 3 --body "看截图" --image a.png --image b.jpg   # --image 可多次
+taskctl comment 3 --body "看截图" --image a.png --image b.jpg   # --image/--file 可多次（图片/文件均可）
 taskctl update 3 --status in_review --if-version 2
 taskctl update 3 --tags "前端,紧急" --if-version 2    # 标签（逗号分隔；--tags "" 清空）
 taskctl done 3 --if-version 3               # 仅用户：验收
@@ -237,8 +237,8 @@ node server/index.mjs
 | POST | `/api/tasks/:id/merge-confirm` | 显式确认生效：源任务 version 未变（变了 409 过期）→ 同事务全部置已取消 + 互链评论，草案 `merged_from` 清空；对草案发起 execute 执行时也会隐式确认 |
 | POST | `/api/tasks/:id/merge-cancel` | 显式放弃：草案置已取消，源任务不受影响；任意入口把草案置 `canceled` 都会触发同样的放弃语义 |
 | POST | `/api/tasks/:id/claim` | 原子认领 |
-| POST | `/api/tasks/:id/comments` | 评论（`author: user\|agent`，`images` 可附图片 dataURL 数组） |
-| GET | `/api/attachments/:taskId/:file` | 评论图片附件 |
+| POST | `/api/tasks/:id/comments` | 评论（`author: user\|agent`，`images` 可附附件 dataURL 数组 `{name?, data}`：图片 png/jpg/gif/webp ≤8MB，文件 pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv/zip ≤15MB，合计 ≤6 个） |
+| GET | `/api/attachments/:taskId/:file` | 评论附件（图片 inline；文件强制下载并回显原始文件名） |
 | POST | `/api/tasks/:id/execute` | 拉起 Agent（`agent, mode?: execute\|qa\|merge, model?, effort?, permission?`；qa 仅待规划/待办/阻塞，merge 仅融合草案、与 execute 同流转进「进行中」；execute 打在融合草案上 = 隐式确认合并） |
 | GET | `/api/runs` · DELETE `/api/tasks/:id/run` | 运行列表 / 停止执行 |
 | GET | `/api/tasks/:id/run/output` | 运行中任务的实时输出（未在运行返回 404） |

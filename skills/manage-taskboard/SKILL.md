@@ -21,7 +21,7 @@ node /Users/eric/codex-task-dashiboard/cli/taskctl.mjs <command>
    用户指定了任务 ID 时直接用该 ID。一次只认领一个任务。
 
 2. **完整阅读**：`taskctl show <id>`。
-   必须读完标题、描述和**全部评论**再动手。评论里可能有验收标准和前轮进展；评论的 `images` 字段是图片附件的绝对路径（用户粘贴的截图等），需要时用读图工具查看。
+   必须读完标题、描述和**全部评论**再动手。评论里可能有验收标准和前轮进展；评论的 `images` 字段是附件的绝对路径（用户粘贴的截图、上传的 PDF/Markdown 等文件；对象条目取 `path` 字段），图片用读图工具查看，md/txt/csv 直接读，docx/xlsx 为二进制需自行转换。
 
 3. **原子认领**：`taskctl claim <id>`。
    - 成功：任务变为 `in_progress`，返回里的 `version` 记好，之后所有更新都要带它。

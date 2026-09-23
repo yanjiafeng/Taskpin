@@ -644,7 +644,7 @@ function closeDrawer() {
   stopSpeak(); // 关抽屉时停止播报
   state.openTaskId = null;
   state.openTask = null;
-  pendingImages = []; // 未发送的附图随抽屉关闭丢弃
+  pendingFiles = []; // 未发送的附件随抽屉关闭丢弃
   $('#drawer').innerHTML = ''; // 同时丢弃残留输入，避免污染下一个打开的任务（见 openDrawer）
   $('#drawer').classList.add('hidden');
   $('#drawer-backdrop').classList.add('hidden');
@@ -832,51 +832,139 @@ async function flushDrawerComment(taskId) {
   const el = document.getElementById('d-comment');
   if (!el) return false;
   const text = el.value.trim();
-  if (!text && pendingImages.length === 0) return false;
+  if (!text && pendingFiles.length === 0) return false;
+  await whenReadsDone(); // 附件还在读则等读完，保证执行启动时 agent 能读到完整评论
+  if (pendingFiles.some((p) => p.reading)) { toast('附件读取超时，评论未提交'); return false; }
   await api(`/api/tasks/${taskId}/comments`, {
     method: 'POST',
-    body: { author: 'user', body: text, images: pendingImages },
+    body: { author: 'user', body: text, images: pendingFiles },
   });
-  pendingImages = [];
+  pendingFiles = [];
   if (el.value.trim() === text) el.value = '';
   return true;
 }
 
-// ---------- 评论图片附件（粘贴/选择，最多 6 张，单张 ≤8MB） ----------
-let pendingImages = []; // [{name, data(dataURL)}]，模块级：SSE 重渲染抽屉时不丢
-const MAX_IMAGES = 6;
+// ---------- 评论附件（图片内联缩略图 / 文件下载条目；粘贴/选择，合计 ≤6 个，图片 ≤8MB、文件 ≤15MB） ----------
+let pendingFiles = []; // [{name, mime, size, data(dataURL)|null, reading}]，模块级：SSE 重渲染抽屉时不丢
+const MAX_ATTACHMENTS = 6;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_BYTES = 15 * 1024 * 1024;
+const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+// 扩展名→mime（浏览器对 md 等常给空 type，以扩展名兜底）；白名单与 db.mjs 的 ATTACHMENT_MIME_EXT 保持一致
+const FILE_EXT_MIME = {
+  pdf: 'application/pdf',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  md: 'text/markdown', txt: 'text/plain', csv: 'text/csv', zip: 'application/zip',
+};
+const FILE_MIMES = new Set(Object.values(FILE_EXT_MIME));
 
 function tokenQS() {
   const t = getToken();
   return t ? `?token=${encodeURIComponent(t)}` : '';
 }
 
-function addPendingImages(files) {
+function fmtSize(n) {
+  if (n == null) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// 扩展名着色分组（PDF 红 / Word 蓝 / Excel 绿 / PPT 橙 / MD 灰…）
+function extClass(ext) {
+  const g = { pdf: 'pdf', doc: 'doc', docx: 'doc', xls: 'xls', xlsx: 'xls', csv: 'xls', ppt: 'ppt', pptx: 'ppt', md: 'md', txt: 'txt', zip: 'zip' }[ext];
+  return g ? `ext-${g}` : '';
+}
+
+function addPendingFiles(files) {
   for (const f of files) {
-    if (!f.type.startsWith('image/')) continue;
-    if (pendingImages.length >= MAX_IMAGES) { toast(`最多 ${MAX_IMAGES} 张图片`); break; }
-    if (f.size > MAX_IMAGE_BYTES) { toast(`「${f.name || '粘贴的图片'}」超过 8MB，已跳过`); continue; }
+    const ext = (f.name?.split('.').pop() || '').toLowerCase();
+    let mime = (f.type || '').toLowerCase();
+    if (!IMAGE_MIMES.has(mime) && FILE_EXT_MIME[ext]) mime = FILE_EXT_MIME[ext];
+    const isImage = IMAGE_MIMES.has(mime);
+    if (!isImage && !FILE_MIMES.has(mime)) {
+      toast(`「${f.name || '粘贴的内容'}」类型不支持（图片 png/jpg/gif/webp；文件 pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv/zip）`);
+      continue;
+    }
+    if (pendingFiles.length >= MAX_ATTACHMENTS) { toast(`最多 ${MAX_ATTACHMENTS} 个附件`); break; }
+    const limit = isImage ? MAX_IMAGE_BYTES : MAX_FILE_BYTES;
+    if (f.size > limit) { toast(`「${f.name || '粘贴的图片'}」超过 ${limit / 1024 / 1024}MB，已跳过`); continue; }
+    const item = { name: f.name || `pasted-${Date.now()}.png`, mime, size: f.size, data: null, reading: true };
+    pendingFiles.push(item);
+    renderPendingStrip();
     const reader = new FileReader();
     reader.onload = () => {
-      pendingImages.push({ name: f.name || `pasted-${Date.now()}.png`, data: reader.result });
+      // 统一重写 dataURL 的 mime 前缀：md 等文件浏览器 type 可能为空/不准，服务端按前缀校验
+      item.data = `data:${mime};base64,${String(reader.result).split(',')[1]}`;
+      item.reading = false;
       renderPendingStrip();
+    };
+    reader.onerror = () => {
+      const i = pendingFiles.indexOf(item);
+      if (i >= 0) pendingFiles.splice(i, 1);
+      renderPendingStrip();
+      toast(`「${item.name}」读取失败`);
     };
     reader.readAsDataURL(f);
   }
 }
 
+// 等所有「读取中」的附件读完（提交/执行前冲刷评论时调用，本地读取一般瞬间完成）
+function whenReadsDone(timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    (function poll() {
+      if (!pendingFiles.some((p) => p.reading) || Date.now() - t0 > timeoutMs) resolve();
+      else setTimeout(poll, 50);
+    })();
+  });
+}
+
 function renderPendingStrip() {
   const strip = $('#img-strip');
   if (!strip) return;
-  strip.classList.toggle('hidden', pendingImages.length === 0);
-  strip.innerHTML = pendingImages.map((img, i) => `
-    <span class="img-thumb">
-      <img src="${img.data}" alt="${esc(img.name)}">
-      <button type="button" class="img-del" data-img-del="${i}" title="移除">×</button>
-    </span>`).join('');
+  strip.classList.toggle('hidden', pendingFiles.length === 0);
+  strip.innerHTML = pendingFiles.map((it, i) => {
+    const del = `<button type="button" class="img-del" data-img-del="${i}" title="移除">×</button>`;
+    if (it.reading) {
+      return `<span class="img-thumb file-thumb reading"><span class="ft-meta"><span class="nm">读取中…</span><span class="sz">${esc(it.name)}</span></span></span>`;
+    }
+    if (it.mime.startsWith('image/')) {
+      return `<span class="img-thumb"><img src="${it.data}" alt="${esc(it.name)}">${del}</span>`;
+    }
+    const ext = (it.name.split('.').pop() || 'file').toLowerCase();
+    return `<span class="img-thumb file-thumb">
+      <span class="file-ext ${extClass(ext)}">${esc(ext)}</span>
+      <span class="ft-meta"><span class="nm" title="${esc(it.name)}">${esc(it.name)}</span><span class="sz">${fmtSize(it.size)}</span></span>${del}</span>`;
+  }).join('');
   strip.querySelectorAll('[data-img-del]').forEach((btn) => {
-    btn.onclick = () => { pendingImages.splice(Number(btn.dataset.imgDel), 1); renderPendingStrip(); };
+    btn.onclick = () => { pendingFiles.splice(Number(btn.dataset.imgDel), 1); renderPendingStrip(); };
+  });
+}
+
+// 带上传进度条的 POST（附件大请求体用，fetch 拿不到上传进度）：返回解析后的 JSON
+function apiUpload(path, body, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', path);
+    xhr.setRequestHeader('content-type', 'application/json');
+    const token = getToken();
+    if (token) xhr.setRequestHeader('authorization', `Bearer ${token}`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data = null;
+      try { data = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch { /* 非 JSON 响应 */ }
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
+      const err = new Error(data?.error?.message || `请求失败 (${xhr.status})`);
+      err.code = data?.error?.code;
+      reject(err);
+    };
+    xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+    xhr.send(JSON.stringify(body));
   });
 }
 
@@ -1090,15 +1178,32 @@ function renderDrawer() {
 
   const commentHtml = (c) => {
     const isQuestion = c.author === 'agent' && c.body.trimStart().startsWith('[提问]');
-    const imgs = (c.images || []).map((img) => {
-      const src = `/api/attachments/${img}${tokenQS()}`;
-      return `<img class="comment-img" src="${src}" alt="附图" loading="lazy">`;
-    }).join('');
+    // 附件分流渲染：图片内联缩略图（点开灯箱），文件渲染为可下载的纸条文件卡。
+    // 历史数据是纯路径字符串（只有图片），按扩展名推断
+    const LEGACY_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+    const imgHtml = [];
+    const fileHtml = [];
+    for (const it of c.images || []) {
+      const att = typeof it === 'string'
+        ? { path: it, name: it.split('/').pop(), mime: LEGACY_IMAGE_EXT.has((it.split('.').pop() || '').toLowerCase()) ? 'image/' : '' }
+        : it;
+      const src = `/api/attachments/${att.path}${tokenQS()}`;
+      if ((att.mime || '').startsWith('image/')) {
+        imgHtml.push(`<img class="comment-img" src="${src}" alt="${esc(att.name || '附图')}" loading="lazy">`);
+      } else {
+        const ext = (att.name.split('.').pop() || 'file').toLowerCase();
+        fileHtml.push(`<a class="file-card" href="${src}" download title="下载 ${esc(att.name)}">
+          <span class="file-ext ${extClass(ext)}">${esc(ext)}</span>
+          <span class="file-meta"><span class="file-name">${esc(att.name)}</span><span class="file-sub">${fmtSize(att.size)}</span></span>
+          <span class="file-dl">⬇</span></a>`);
+      }
+    }
     return `
     <div class="comment${isQuestion ? ' question' : ''}${c.author === 'user' ? ' from-user' : ''}${c.author === 'system' ? ' from-system' : ''}">
       <div class="who"><span class="author ${esc(c.author)}">${c.author === 'agent' ? 'Agent' : c.author === 'system' ? '系统' : '用户'}</span>${isQuestion ? '<span class="q-badge">等你答复</span>' : ''}<span>${esc(fmtLocal(c.created_at))}</span></div>
       <div class="body">${md(c.body)}</div>
-      ${imgs ? `<div class="comment-imgs">${imgs}</div>` : ''}
+      ${imgHtml.length ? `<div class="comment-imgs">${imgHtml.join('')}</div>` : ''}
+      ${fileHtml.length ? `<div class="comment-files">${fileHtml.join('')}</div>` : ''}
     </div>`;
   };
 
@@ -1189,11 +1294,12 @@ function renderDrawer() {
         <div class="d-composer">
           <form id="comment-form"${showReply ? ' class="reply-mode"' : ''}>
             ${showReply ? '<label class="reply-hint">↩ 正在答复 Agent 的提问：提交后自动续跑会话（只想记录评论可先忽略，提问会保留）</label>' : ''}
-            <textarea id="d-comment" rows="4" placeholder="${showReply ? '答复 Agent 的提问…（提交后自动续跑会话；可直接粘贴截图）' : '写评论…（验收意见、补充说明；可直接粘贴截图）'}"></textarea>
+            <textarea id="d-comment" rows="4" placeholder="${showReply ? '答复 Agent 的提问…（提交后自动续跑会话；可粘贴截图，或点 📎 添加图片/文件）' : '写评论…（验收意见、补充说明；可粘贴截图，或点 📎 添加图片/文件）'}"></textarea>
             <div id="img-strip" class="img-strip hidden"></div>
+            <div id="upload-bar" class="upload-bar hidden"><div class="upload-fill"></div><span class="upload-pct"></span></div>
             <div class="row comment-actions">
-              <button type="button" class="btn ghost" id="img-btn" title="添加图片（也可直接粘贴）">📎</button>
-              <input type="file" id="img-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+              <button type="button" class="btn ghost" id="img-btn" title="添加图片或文件（也可直接粘贴截图）">📎</button>
+              <input type="file" id="img-input" accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.md,.txt,.csv,.zip" multiple hidden>
               <button type="submit" class="btn primary">${showReply ? '答复并继续' : '发表评论'}</button>
               ${runCtl}
             </div>
@@ -1438,28 +1544,35 @@ function renderDrawer() {
     }
   });
   $('#d-run-menu')?.addEventListener('click', () => $('#d-run-menu').classList.add('hidden'));
-  // 评论附图：textarea 直接粘贴截图，或点 📎 选择（手机端走相册）
+  // 评论附件：textarea 直接粘贴截图（粘贴只收图片），或点 📎 选择图片/文件
   $('#d-comment').addEventListener('paste', (e) => {
     const files = [...(e.clipboardData?.items || [])]
       .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
       .map((it) => it.getAsFile());
-    if (files.length) { e.preventDefault(); addPendingImages(files); }
+    if (files.length) { e.preventDefault(); addPendingFiles(files); }
   });
   $('#img-btn').onclick = () => $('#img-input').click();
-  $('#img-input').onchange = (e) => { addPendingImages([...e.target.files]); e.target.value = ''; };
-  renderPendingStrip(); // 抽屉重渲染后恢复未发送的附图
+  $('#img-input').onchange = (e) => { addPendingFiles([...e.target.files]); e.target.value = ''; };
+  renderPendingStrip(); // 抽屉重渲染后恢复未发送的附件
   $('#comment-form').onsubmit = async (e) => {
     e.preventDefault();
     const btn = e.target.querySelector('button[type=submit]');
     withLoading(btn, async () => {
       const body = $('#d-comment').value.trim();
-      if (!body && pendingImages.length === 0) return;
+      if (!body && pendingFiles.length === 0) return;
+      await whenReadsDone();
+      if (pendingFiles.some((p) => p.reading)) { toast('附件读取超时，请重试', 'error'); return; }
+      const bar = $('#upload-bar');
+      const showProgress = (pct) => {
+        if (!bar) return;
+        bar.classList.remove('hidden');
+        bar.querySelector('.upload-fill').style.width = `${Math.round(pct * 100)}%`;
+        bar.querySelector('.upload-pct').textContent = `上传中 ${Math.round(pct * 100)}%`;
+      };
       try {
-        await api(`/api/tasks/${t.id}/comments`, {
-          method: 'POST',
-          body: { author: 'user', body, images: pendingImages },
-        });
-        pendingImages = [];
+        // XHR 带真实上传进度（附件大请求体时不再「卡住」无反馈）；失败不丢草稿与待发送附件
+        await apiUpload(`/api/tasks/${t.id}/comments`, { author: 'user', body, images: pendingFiles }, showProgress);
+        pendingFiles = [];
         // 清空已发送的文本：否则 300ms 后的重渲（scheduleReload/SSE）会把它当未发送草稿
         // 抢救恢复回输入框，看起来像没保存成功，还会被重复提交。
         // 请求期间用户又打了字（值变了）则不动，保留新输入
@@ -1480,6 +1593,12 @@ function renderDrawer() {
       } catch (err) {
         toast(err.message, 'error');
         scheduleReload();
+      } finally {
+        if (bar) {
+          bar.classList.add('hidden');
+          bar.querySelector('.upload-fill').style.width = '0';
+          bar.querySelector('.upload-pct').textContent = '';
+        }
       }
     });
   };

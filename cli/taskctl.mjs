@@ -5,7 +5,7 @@ import {
   openDb, defaultDbPath, ensureDefaultProject,
   listProjects, createProject, updateProject, deleteProject, listTasks, getTaskWithComments,
   createTask, claimTask, updateTask, addComment, saveAttachments, attachmentsDir, searchMemories,
-  mergeTasks, confirmMerge, cancelMerge, compactComments, DbError,
+  mergeTasks, confirmMerge, cancelMerge, compactComments, DbError, ATTACHMENT_MIME_EXT,
 } from '../server/db.mjs';
 import { startServer } from '../server/index.mjs';
 import { readFileSync } from 'node:fs';
@@ -30,7 +30,7 @@ commands:
   merge --ids 1,2,3                      合并融合第一步：校验（2~5 个、同项目、非已取消/进行中）并建 backlog 融合草案（融合执行需在看板 UI 发起，CLI 只建草案）
   merge-confirm ID                       第二步：确认生效——源任务 version 未变则全部置已取消并互链评论
   merge-cancel ID                        第二步：放弃——草案置已取消，源任务不受影响
-  comment ID --body B [--author user|agent] [--image P]...   评论；--image 可多次附图（png/jpg/gif/webp）
+  comment ID --body B [--author user|agent] [--image P]... [--file P]...   评论；--image/--file 可多次添加附件（图片 png/jpg/gif/webp，文件 pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv/zip）
   memory search <关键词> [--project ID] [--limit N]   检索项目记忆（BM25 + 时间衰减；--project 不传则搜全部项目）
 
 env:
@@ -72,10 +72,15 @@ function need(value, message) {
 
 const parsePaths = (s) => String(s).split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
 
-const MIME_BY_EXT = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+// ext→mime 与 db.mjs 附件白名单同源（另加 .jpeg/.markdown 别名）
+const MIME_BY_EXT = {
+  ...Object.fromEntries(Object.entries(ATTACHMENT_MIME_EXT).map(([mime, ext]) => [`.${ext}`, mime])),
+  '.jpeg': 'image/jpeg',
+  '.markdown': 'text/markdown',
+};
 function fileToDataUrl(p) {
   const mime = MIME_BY_EXT[extname(p).toLowerCase()];
-  if (!mime) throw new DbError('VALIDATION', `不支持的图片类型：${p}（仅 png/jpg/gif/webp）`);
+  if (!mime) throw new DbError('VALIDATION', `不支持的附件类型：${p}（图片 png/jpg/gif/webp；文件 pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv/zip）`);
   return { name: p, data: `data:${mime};base64,${readFileSync(p).toString('base64')}` };
 }
 
@@ -144,8 +149,14 @@ function main() {
       const t = getTaskWithComments(db, id);
       // --compact：续跑省 token（剔除 [runner] 评论、折叠「最新一轮」之前的早期评论）
       if (flags.compact === true) t.comments = compactComments(t.comments);
-      // 图片附件转成绝对路径，agent 可直接用读图工具查看
-      t.comments.forEach((c) => { c.images = (c.images || []).map((img) => join(attachmentsDir(dbPath), img)); });
+      // 附件转成绝对路径，agent 可直接读取（图片用读图工具，md/txt/csv 直接读）
+      t.comments.forEach((c) => {
+        c.images = (c.images || []).map((img) => {
+          const rel = typeof img === 'string' ? img : img.path;
+          const abs = join(attachmentsDir(dbPath), rel);
+          return typeof img === 'string' ? abs : { ...img, path: abs };
+        });
+      });
       if (pretty) {
         console.log(prettyTask(t));
         console.log(`project:#${t.project_id} ${t.project_name ?? ''}${t.project_path ? ` (${t.project_path})` : ''} created:${t.created_at} updated:${t.updated_at}`);
@@ -154,7 +165,9 @@ function main() {
         console.log(t.description || '(no description)');
         t.comments.forEach((c) => {
           console.log(`\n[${c.author} ${c.created_at}]\n${c.body}`);
-          (c.images || []).forEach((img) => console.log(`[图片] ${img}`));
+          (c.images || []).forEach((img) => console.log(
+            typeof img === 'string' ? `[附件] ${img}` : `[附件] ${img.name} -> ${img.path}`,
+          ));
         });
       } else out(t);
       return;
@@ -224,9 +237,12 @@ function main() {
     }
     case 'comment': {
       const id = Number(need(pos[0], 'task id is required'));
-      // --image 可多次：读文件转 dataURL，存到 <db 目录>/attachments/<taskId>/
-      const imagePaths = flags.image != null ? [flags.image].flat() : [];
-      const images = saveAttachments(attachmentsDir(dbPath), id, imagePaths.map((p) => fileToDataUrl(p)));
+      // --image/--file 可多次：读文件转 dataURL，存到 <db 目录>/attachments/<taskId>/
+      const filePaths = [
+        ...(flags.image != null ? [flags.image].flat() : []),
+        ...(flags.file != null ? [flags.file].flat() : []),
+      ];
+      const images = saveAttachments(attachmentsDir(dbPath), id, filePaths.map((p) => fileToDataUrl(p)));
       // --author 只放行 user/agent；system 是服务端内部通知专用，CLI 不可伪造
       const author = ['user', 'agent'].includes(flags.author) ? flags.author : 'agent';
       out(addComment(db, id, {
