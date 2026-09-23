@@ -54,7 +54,7 @@ function checkAuth(req, url, expected) {
   return timingSafeEqual(a, b);
 }
 
-export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota, reapGraceMs, reapPollMs } = {}) {
+export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota, reapGraceMs, reapPollMs, noOutputMs } = {}) {
   const db = openDb(dbPath);
   ensureDefaultProject(db);
 
@@ -76,7 +76,7 @@ export function createApp({ dbPath, spawnFn, port, attachmentsDir, quota, reapGr
   heartbeat.unref();
 
   const resolvedDbPath = dbPath ?? defaultDbPath();
-  const runner = createRunner({ db, broadcast, dbPath: resolvedDbPath, spawnFn, ...(reapGraceMs != null ? { reapGraceMs } : {}), ...(reapPollMs != null ? { reapPollMs } : {}) });
+  const runner = createRunner({ db, broadcast, dbPath: resolvedDbPath, spawnFn, ...(reapGraceMs != null ? { reapGraceMs } : {}), ...(reapPollMs != null ? { reapPollMs } : {}), ...(noOutputMs != null ? { noOutputMs } : {}) });
   // 回收「残留进行中」：运行跟踪在内存，服务重启即丢失——停在「进行中」但没有活跃 run 的
   // 任务（上次会话进程随重启中断、外部认领后 agent 失联等）自动放回「待规划」，否则会以无
   // 执行样式的普通卡片永久滞留「进行中」列。启动时先收一次，之后每 30s 周期兜底

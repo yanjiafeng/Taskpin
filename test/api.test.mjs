@@ -1256,6 +1256,67 @@ test('残留进程超时自动回收：交付后进程不退 → 宽限期后 SI
   }
 });
 
+test('挂死看门狗：超 noOutputMs 无输出 → 按手动停止语义回收；有输出刷新计时；qa 同样生效', async () => {
+  const { EventEmitter } = await import('node:events');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const procs = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    const p = new EventEmitter();
+    p.pid = 61000 + procs.length;
+    p.stdout = new EventEmitter();
+    p.stderr = new EventEmitter();
+    p.kill = () => { p.killed = true; p.emit('exit', 143); };
+    procs.push({ proc: p, cmd, args, opts });
+    return p;
+  };
+  const app = createApp({ dbPath: ':memory:', spawnFn: fakeSpawn, noOutputMs: 400, reapGraceMs: 60_000, reapPollMs: 50 });
+  const srv = app.server;
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  const rq = async (method, path, body) => {
+    const res = await fetch(b + path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  try {
+    await rq('PATCH', '/api/projects/1', { main_dir: mkdtempSync(join(tmpdir(), 'tb-hang-')) });
+
+    // execute 模式：任务在「进行中」，有输出时计时刷新不杀；静默超阈值后按手动停止语义回收
+    const t1 = (await rq('POST', '/api/tasks', { project_id: 1, title: '看门狗A' })).data;
+    await rq('POST', `/api/tasks/${t1.id}/execute`, { agent: 'kimi' });
+    await sleep(250);
+    procs[0].proc.stdout.emit('data', 'working...'); // 有输出 → 挂死计时刷新
+    await sleep(250); // 距上次输出 ~250ms < 400ms 阈值
+    assert.ok(!procs[0].proc.killed, '静默未超阈值不应被回收');
+    await sleep(400); // 距上次输出 ~650ms > 400ms 阈值
+    assert.ok(procs[0].proc.killed, '静默超阈值应被自动回收');
+    const d1 = (await rq('GET', `/api/tasks/${t1.id}`)).data;
+    assert.equal(d1.status, 'backlog'); // 按手动停止语义回待规划
+    const hangC = d1.comments.find((c) => c.body.includes('疑似挂死'));
+    assert.ok(hangC);
+    assert.equal(hangC.author, 'system');
+    assert.ok(hangC.body.includes('回到「待规划」'));
+    const finishC = d1.comments.find((c) => c.body.includes('[runner] kimi'));
+    assert.ok(finishC?.body.includes('已停止（SIGTERM）')); // 回收不算异常退出
+    assert.equal(d1.last_run, null); // 不打「异常退出」红标
+    assert.equal((await rq('GET', '/api/runs')).data.length, 0);
+
+    // qa 模式：任务不进「进行中」也受看门狗保护；回收不改状态、照写说明评论
+    const t2 = (await rq('POST', '/api/tasks', { project_id: 1, title: '看门狗B', status: 'backlog' })).data;
+    await rq('POST', `/api/tasks/${t2.id}/execute`, { agent: 'kimi', mode: 'qa' });
+    await sleep(600);
+    assert.ok(procs[1].proc.killed, 'qa 挂死同样应被回收');
+    const d2 = (await rq('GET', `/api/tasks/${t2.id}`)).data;
+    assert.equal(d2.status, 'backlog');
+    assert.ok(d2.comments.find((c) => c.body.includes('疑似挂死')));
+  } finally {
+    srv.close();
+  }
+});
+
 test('续跑瘦身：同 agent 续跑的 prompt 不注入项目记忆，新会话仍注入', async () => {
   const { EventEmitter } = await import('node:events');
   const procs = [];
