@@ -384,7 +384,7 @@ function buildPrompt(task, projectPaths, { resume, mode, templates, agent, memor
   return withMemory;
 }
 
-export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGraceMs = 10_000, reapPollMs = 2_000, noOutputMs = 600_000 } = {}) {
+export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGraceMs = 10_000, reapPollMs = 2_000 } = {}) {
   const runs = new Map(); // taskId -> {task_id, agent, pid, started_at, proc, output}
 
   function publicRun({ proc, output, watcher, ...pub }) {
@@ -489,36 +489,29 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
       throw err;
     }
     const mode = [execMode === 'qa' ? '问答' : execMode === 'merge' ? '融合' : null, options.model, options.effort, options.permission, resumeId ? '续跑' : null].filter(Boolean).join(' · ');
-    const run = { task_id: taskId, agent, mode, pid: proc.pid, started_at: new Date().toISOString(), proc, output: '', sessionId: null, stopping: false, lastOutputAt: Date.now() };
+    const run = { task_id: taskId, agent, mode, pid: proc.pid, started_at: new Date().toISOString(), proc, output: '', sessionId: null, stopping: false };
     runs.set(taskId, run);
-    // 挂死看门狗（execute/merge/qa 所有模式）：进程超过 noOutputMs 无任何 stdout/stderr 输出
-    // → 疑似挂死（kimi -p 长会话冻结实测：任务停在「进行中」零回写 78 分钟、输出尾部停在
-    // "Let me delegate."，只能人工停止，#127/#129），按手动停止同等语义 SIGTERM 回收
-    // （stopping=true 不打异常标记；任务仍在「进行中」由 stop 先放回待规划）。
-    // 残留进程超时回收（execute/merge）：任务已离开「进行中」（交付待验收/提问进阻塞等）
+    // 残留进程超时自动回收（execute/merge 模式）：任务已离开「进行中」（交付待验收/提问进阻塞等）
     // 但进程迟迟不退（kimi 长会话挂死实测 22h，#83）——宽限 reapGraceMs 后按用户手动停止同等
-    // 语义 SIGTERM。qa 模式任务本就不进「进行中」，不能套用残留判定（否则会误杀整个问答执行）
-    const noOutputLabel = noOutputMs % 60_000 === 0 ? `${noOutputMs / 60_000} 分钟` : `${noOutputMs / 1000}s`;
-    const watcher = setInterval(() => {
-      if (!run.stopping && Date.now() - run.lastOutputAt > noOutputMs) {
-        stop(taskId, `执行进程（${agent} pid ${proc.pid}）超过 ${noOutputLabel} 无任何输出，疑似挂死，已超时自动回收（SIGTERM，按手动停止处理）`);
-        return;
-      }
-      if (execMode === 'qa') return;
-      let cur;
-      try { cur = getTask(db, taskId); } catch { return; } // 任务被删则等进程自己退
-      if (cur.status === 'in_progress') { run.reapSince = null; return; } // 仍在执行，不打扰
-      if (!run.reapSince) { run.reapSince = Date.now(); return; } // 刚离开进行中，开始计宽限
-      if (run.stopping || Date.now() - run.reapSince < reapGraceMs) return;
-      run.stopping = true; // 自动回收等同手动停止：不打失败标记
-      try {
-        addComment(db, taskId, { author: 'system', body: `任务已是「${cur.status}」，但执行进程（${agent} pid ${proc.pid}）超过 ${Math.round(reapGraceMs / 1000)}s 宽限期仍未退出，已超时自动回收（SIGTERM，按手动停止处理）` });
-      } catch { /* 任务可能已被删除 */ }
-      run.proc.kill('SIGTERM'); // exit 事件触发 finish 清理
-      broadcast();
-    }, reapPollMs);
-    watcher.unref?.();
-    run.watcher = watcher;
+    // 语义 SIGTERM（stopping=true，finish 不打「异常退出」标记）。qa 模式任务本就不进
+    // 「进行中」，不能套用此判定（否则会把整个问答执行误杀）
+    if (execMode !== 'qa') {
+      const watcher = setInterval(() => {
+        let cur;
+        try { cur = getTask(db, taskId); } catch { return; } // 任务被删则等进程自己退
+        if (cur.status === 'in_progress') { run.reapSince = null; return; } // 仍在执行，不打扰
+        if (!run.reapSince) { run.reapSince = Date.now(); return; } // 刚离开进行中，开始计宽限
+        if (run.stopping || Date.now() - run.reapSince < reapGraceMs) return;
+        run.stopping = true; // 自动回收等同手动停止：不打失败标记
+        try {
+          addComment(db, taskId, { author: 'system', body: `任务已是「${cur.status}」，但执行进程（${agent} pid ${proc.pid}）超过 ${Math.round(reapGraceMs / 1000)}s 宽限期仍未退出，已超时自动回收（SIGTERM，按手动停止处理）` });
+        } catch { /* 任务可能已被删除 */ }
+        run.proc.kill('SIGTERM'); // exit 事件触发 finish 清理
+        broadcast();
+      }, reapPollMs);
+      watcher.unref?.();
+      run.watcher = watcher;
+    }
     // 新执行开始：清除上一次的异常退出标记
     try { setTaskLastRun(db, taskId, null); } catch { /* 任务可能已被删除 */ }
     // 记录本次选用的模型/思考/权限（按任务记忆：执行弹框回填 + 卡片展示「上一次」）
@@ -533,7 +526,6 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
     } catch { /* 任务可能已被删除 */ }
     const onData = (d) => {
       run.output = (run.output + d).slice(-OUTPUT_CAP);
-      run.lastOutputAt = Date.now(); // 任何输出都刷新挂死看门狗的计时
       if (!run.sessionId) {
         const m = SESSION_PATTERNS[agent]?.exec(run.output);
         if (m) run.sessionId = m[1];
@@ -609,19 +601,17 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
     broadcast();
   }
 
-  function stop(taskId, note) {
+  function stop(taskId) {
     const run = runs.get(taskId);
     if (!run) return false;
-    run.stopping = true; // 用户停止/自动回收不是异常退出，finish 不打失败标记
-    // 停止 = 暂停执行：先流转回待规划再 kill，finish 清理时看到已不是 in_progress 就不会重复放回
-    // （agent 若已自行流转到别的状态则不打扰）；note 为自动回收等场景自定义的说明评论
+    run.stopping = true; // 用户停止不是异常退出，finish 不打失败标记
+    // 用户停止 = 暂停执行：先流转回待规划再 kill，finish 清理时看到已不是 in_progress 就不会重复放回
+    // （agent 若已自行流转到别的状态则不打扰）
     try {
       const task = getTask(db, taskId);
       if (task.status === 'in_progress') {
         updateTask(db, taskId, { version: task.version, status: 'backlog' });
-        addComment(db, taskId, { author: 'system', body: note ? `${note}，任务回到「待规划」` : '已停止执行，任务回到「待规划」' });
-      } else if (note) {
-        addComment(db, taskId, { author: 'system', body: note });
+        addComment(db, taskId, { author: 'system', body: '已停止执行，任务回到「待规划」' });
       }
     } catch { /* 任务可能已被删除 */ }
     run.proc.kill('SIGTERM'); // exit 事件触发 finish 清理
