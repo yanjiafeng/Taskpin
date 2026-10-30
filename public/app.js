@@ -95,7 +95,9 @@ const state = {
   historyOpen: false, // 抽屉里「更早评论」折叠条的展开状态（SSE 重渲时保持；换任务时重置）
   selectMode: false, // 多选模式（合并融合入口）：卡片显示勾选框，点卡片 = 勾选而非开抽屉
   selected: new Set(), // 多选模式勾选的 taskId
+  reviewSeen: {}, // 「待验收」已查看标记 {taskId: seen_at}，存服务端（review_seen 表），所有设备共享
 };
+localStorage.removeItem('taskboard_review_seen'); // 旧版本地缓存（localStorage 时代）一次性清理
 
 // 可参与合并融合的任务状态（与 server/db.mjs 的 MERGEABLE_STATUSES 保持一致；已取消/进行中除外）
 const MERGEABLE_STATUSES = ['backlog', 'todo', 'blocked', 'in_review', 'done'];
@@ -112,6 +114,24 @@ function loadProjectIds() {
 }
 function saveProjectIds() {
   localStorage.setItem('taskboard_projects', JSON.stringify(state.projectIds));
+}
+
+// 「待验收」未查看标记：已查看状态存服务端（GET/POST review-seen，task_id → seen_at），
+// 所有设备共享且随 SSE 实时同步；任务 updated_at 晚于 seen_at（重新交付/有更新）即重新视为未查看。
+// 打开抽屉即标记：先本地乐观更新摘掉标记，再异步落库（失败不打扰，下次重载以服务端为准）
+function markReviewSeen(id, task) {
+  const t = task || state.tasks.find((x) => x.id === id);
+  if (!t || t.status !== 'in_review') return;
+  const seenAt = state.reviewSeen[id];
+  if (seenAt && Date.parse(seenAt) >= Date.parse(t.updated_at)) return;
+  state.reviewSeen[id] = new Date().toISOString();
+  api(`/api/tasks/${id}/review-seen`, { method: 'POST' }).catch(() => { /* 静默：下次重载以服务端为准 */ });
+  // 不整板重渲：只摘掉这张卡的未查看标记
+  const card = document.querySelector(`.card[data-id="${id}"]`);
+  if (card) {
+    card.classList.remove('unseen');
+    card.querySelector('.unseen-pill')?.remove();
+  }
 }
 
 // 支持 ?token=xxx 与 #token=xxx 链接直接登录：写入 localStorage 后从地址栏抹掉
@@ -236,12 +256,15 @@ async function loadProjects() {
 
 async function loadTasks() {
   const qs = state.projectIds.length ? `project_id=${state.projectIds.join(',')}&` : '';
-  const [tasks, runs] = await Promise.all([
+  // review-seen 单独容错：旧版服务进程（未重启）没这个接口时不拖垮整个看板加载，保持现有标记
+  const [tasks, runs, reviewSeen] = await Promise.all([
     api(`/api/tasks?${qs}include_canceled=1`),
     api('/api/runs'),
+    api('/api/review-seen').catch(() => null),
   ]);
   state.tasks = tasks;
   state.runs = new Map(runs.map((r) => [r.task_id, r]));
+  if (reviewSeen) state.reviewSeen = reviewSeen;
   renderBoard();
   scheduleRunsPoll();
   if (state.openTaskId != null) await refreshDrawer();
@@ -417,8 +440,12 @@ function cardHtml(t) {
   const checked = selectable && state.selected.has(t.id);
   // 融合草案标记（merged_from 非空 = 待确认的合并草案）
   const draftPill = t.merged_from ? '<span class="pill merge-draft" title="融合草案：确认后源任务将取消">🧬 融合草案</span>' : '';
+  // 「待验收」未查看标记：绿底上叠金色渐变 + 金图钉 + 胶囊，打开抽屉查看后恢复纯绿（markReviewSeen）
+  const seenAt = state.reviewSeen[t.id];
+  const unseen = t.status === 'in_review' && (!seenAt || Date.parse(seenAt) < Date.parse(t.updated_at));
+  const unseenPill = unseen ? '<span class="pill unseen-pill" title="新交付待验收，尚未打开查看">● 待查看</span>' : '';
   return `
-    <div class="card${live ? ' running' : ''}${failBadge ? ' run-failed' : ''}${selectable ? ' selectable' : ''}${checked ? ' selected' : ''}" draggable="${state.selectMode ? 'false' : 'true'}" data-id="${t.id}" style="--rot:${cardTilt(t.id)}deg">
+    <div class="card${live ? ' running' : ''}${failBadge ? ' run-failed' : ''}${selectable ? ' selectable' : ''}${checked ? ' selected' : ''}${unseen ? ' unseen' : ''}" draggable="${state.selectMode ? 'false' : 'true'}" data-id="${t.id}" style="--rot:${cardTilt(t.id)}deg">
       ${selectable ? `<span class="c-check" aria-hidden="true">${checked ? '✓' : ''}</span>` : ''}
       ${live ? '<span class="hang-tag">执行中</span>' : ''}
       ${orphan ? '<span class="orphan-tag" title="任务停在「进行中」但没有活跃执行进程（执行中断/失联），将自动收回「待规划」">⚠ 执行中断</span>' : ''}
@@ -426,6 +453,7 @@ function cardHtml(t) {
       ${tagsRow}
       <div class="c-pills">
         <span class="pill">#${t.id}</span>
+        ${unseenPill}
         ${draftPill}
         ${projPill}
         <span class="pill prio-${esc(t.priority)}">● ${esc(PRIORITY_LABEL[t.priority] || t.priority)}</span>
@@ -632,6 +660,7 @@ async function submitMerge(btn) {
 async function openDrawer(id) {
   state.openTaskId = id;
   state.historyOpen = false; // 换任务时历史评论回到默认折叠
+  markReviewSeen(id); // 「待验收」卡片打开即摘掉未查看标记（卡片恢复纯绿）
   // 立即打开抽屉并显示图钉加载动画，避免点击卡片后「卡一下」的空白等待
   $('#drawer').innerHTML =
     '<div class="drawer-loading"><div class="load-note"></div><div class="load-text">正在打开任务…</div></div>';
@@ -821,6 +850,7 @@ async function refreshDrawer() {
     closeDrawer();
     return;
   }
+  markReviewSeen(state.openTaskId, state.openTask); // 抽屉打开期间的更新也视为已查看
   renderDrawer();
 }
 
@@ -1915,55 +1945,87 @@ function applyTheme(theme) {
 }
 
 // ---------- SSE ----------
-// 服务器每 15s 发一次 {"type":"ping"} 心跳。SSE 连接可能静默僵死——不触发 onerror、
+// 服务器每 15s 发一次 {"type":"ping"} 心跳。SSE 连接可能静默僵死——不触发错误、
 // 事件却再也收不到（手机端/隧道空闲超时尤其常见），因此靠前端的 lastEvent 活性判断 +
-// 看门狗主动重连，而不是干等 onerror。超过 SSE_STALE_MS 无任何事件（含心跳）即视为僵死。
-let sseEs = null;
+// 看门狗主动重连。超过 SSE_STALE_MS 无任何事件（含心跳）即视为僵死。
+// 注意：cloudflared 快速隧道会把 GET 的 SSE 响应整体缓冲到连接关闭才下发（cloudflared#1449，
+// 表现为手机端「连接总是断开」），POST 的流式响应不受影响——所以这里不用 EventSource
+//（只能 GET），改用 fetch(POST) + ReadableStream 手动解析事件流；服务端 /api/events 不校验方法。
+let sseAbort = null;
 let sseLastEventAt = 0;
+let sseSettingsTimer = null;
 const SSE_STALE_MS = 45_000;
 
-function connectEvents() {
-  if (sseEs) { sseEs.close(); sseEs = null; } // 幂等：重复调用先关掉旧连接
+function handleSseFrame(frame) {
+  let type = null;
+  for (const line of frame.split('\n')) {
+    if (!line.startsWith('data:')) continue;
+    try { type = JSON.parse(line.slice(5).trim())?.type || 'change'; } catch { type = 'change'; /* 解析失败按变更处理 */ }
+  }
+  if (type === null) return; // retry: 等非数据帧
+  sseLastEventAt = Date.now();
+  if (type === 'ping') return; // 心跳只刷新活性时间，不触发重载
+  // 任务/评论/项目变更：走统一去抖重载（与本地操作后的显式刷新合并，防同一次变更重渲两遍）
+  scheduleReload();
+  clearTimeout(sseSettingsTimer);
+  sseSettingsTimer = setTimeout(() => loadSettings().catch(() => { /* 设置拉取失败沿用本地状态 */ }), 300);
+}
+
+async function connectEvents() {
+  if (sseAbort) { sseAbort.abort(); sseAbort = null; } // 幂等：重复调用先断掉旧连接
+  const ac = new AbortController();
+  sseAbort = ac;
+  const headers = {};
   const token = getToken();
-  const url = token ? `/api/events?token=${encodeURIComponent(token)}` : '/api/events';
-  const es = new EventSource(url);
-  sseEs = es;
-  let timer = null;
-  es.onopen = () => {
-    sseLastEventAt = Date.now();
-    // 重连成功（非首次连接）：断连期间服务器广播的 change 事件不会重放，补一次全量重载。
-    // 手机端锁屏/切后台会挂起 SSE，期间的「执行完成 → 待验收」等变更全靠重连这次补拉
-    if (connectEvents.connected) scheduleReload();
-    connectEvents.connected = true;
-  };
-  es.onmessage = (ev) => {
-    sseLastEventAt = Date.now();
-    let type = 'change';
-    try { type = JSON.parse(ev.data)?.type || 'change'; } catch { /* 解析失败按变更处理 */ }
-    if (type === 'ping') return; // 心跳只刷新活性时间，不触发重载
-    // 任务/评论/项目变更：走统一去抖重载（与本地操作后的显式刷新合并，防同一次变更重渲两遍）
-    scheduleReload();
-    clearTimeout(timer);
-    timer = setTimeout(() => loadSettings().catch(() => { /* 设置拉取失败沿用本地状态 */ }), 300);
-  };
-  es.onerror = () => {
-    es.close();
-    if (sseEs === es) sseEs = null;
-    setTimeout(connectEvents, 3000);
-  };
+  if (token) headers.authorization = `Bearer ${token}`;
+  let res;
+  try {
+    res = await fetch('/api/events', { method: 'POST', headers, signal: ac.signal });
+    if (!res.ok || !res.body) throw new Error(`events ${res.status}`);
+  } catch {
+    if (sseAbort === ac) sseAbort = null;
+    if (!ac.signal.aborted) setTimeout(connectEvents, 3000);
+    return;
+  }
+  sseLastEventAt = Date.now();
+  // 重连成功（非首次连接）：断连期间服务器广播的 change 事件不会重放，补一次全量重载。
+  // 手机端锁屏/切后台会挂起连接，期间的「执行完成 → 待验收」等变更全靠重连这次补拉
+  if (connectEvents.connected) scheduleReload();
+  connectEvents.connected = true;
+  // 手动解析 SSE 帧：按空行分帧，帧内取 data: 行
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error('events stream closed');
+      sseLastEventAt = Date.now();
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        handleSseFrame(frame);
+      }
+    }
+  } catch {
+    if (sseAbort === ac) sseAbort = null;
+    if (!ac.signal.aborted) setTimeout(connectEvents, 3000);
+  }
 }
 
 // 心跳看门狗：前台状态下每 10s 检查一次，连接僵死立即重连（不等 TCP 超时，可能是分钟级）
 setInterval(() => {
-  if (document.hidden || !sseEs) return;
+  if (document.hidden || !sseAbort) return;
   if (Date.now() - sseLastEventAt > SSE_STALE_MS) connectEvents();
 }, 10_000);
 
-// 页面从后台/锁屏回到前台：补拉一次 + 连接可能已僵死，超期立即重连不等 onerror
+// 页面从后台/锁屏回到前台：补拉一次 + 连接可能已僵死，超期立即重连
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   scheduleReload();
-  if (!sseEs || Date.now() - sseLastEventAt > SSE_STALE_MS) connectEvents();
+  if (!sseAbort || Date.now() - sseLastEventAt > SSE_STALE_MS) connectEvents();
 });
 
 // ---------- 入口 ----------

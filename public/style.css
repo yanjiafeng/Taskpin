@@ -348,6 +348,19 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 .column[data-col="in_progress"] .card { background: var(--note-pink); }
 .column[data-col="blocked"] .card { background: var(--note-block); }
 .column[data-col="in_review"] .card { background: var(--note-green); }
+/* 「待验收」未查看：仍以绿色为底，叠一层蜂蜜金渐变（左上角泛金）+ 金色图钉 + 「待查看」胶囊；
+   打开抽屉查看后由 app.js markReviewSeen 摘掉 .unseen，恢复纯绿 */
+.column[data-col="in_review"] .card.unseen {
+  background: linear-gradient(160deg, #ffe8a6 0%, #eee9ac 38%, var(--note-green) 75%);
+}
+.column[data-col="in_review"] .card.unseen::before {
+  background: radial-gradient(circle at 35% 30%, #ffdf94, var(--amber) 55%, #c07f1a);
+}
+.card .pill.unseen-pill {
+  color: #a06a10;
+  border-color: rgba(232, 163, 61, 0.65);
+  font-weight: 700;
+}
 .column[data-col="done"] .card { background: var(--note-pale); }
 .column[data-col="canceled"] .card { background: var(--note-gray); opacity: 0.6; }
 .column[data-col="canceled"] .card .title { text-decoration: line-through; }

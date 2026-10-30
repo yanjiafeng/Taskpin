@@ -27,7 +27,7 @@ commands:
   claim ID [--thread-id X]               原子认领：todo -> in_progress
   update ID --if-version N [--status S] [--title T] [--desc D] [--priority P] [--thread-id X] [--tags a,b,c]
   done ID --if-version N                 用户验收：in_review -> done（仅用户）
-  merge --ids 1,2,3                      合并融合第一步：校验（2~5 个、同项目、非已取消/进行中）并建 backlog 融合草案（融合执行需在看板 UI 发起，CLI 只建草案）
+  merge --ids 1,2,3                      合并融合第一步：校验（2~5 个、非已取消/进行中；允许跨项目）并建 backlog 融合草案（融合执行需在看板 UI 发起，CLI 只建草案）
   merge-confirm ID                       第二步：确认生效——源任务 version 未变则全部置已取消并互链评论
   merge-cancel ID                        第二步：放弃——草案置已取消，源任务不受影响
   comment ID --body B [--author user|agent] [--image P]... [--file P]...   评论；--image/--file 可多次添加附件（图片 png/jpg/gif/webp，文件 pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv/zip）

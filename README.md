@@ -39,6 +39,7 @@
 - **语音播报**：任务详情「最新一轮」旁 🔊 一键朗读 Agent 回答——免费、不烧 token；优先用浏览器内置 Web Speech API（手机端本机发声），浏览器不支持时自动走服务端 Windows SAPI 离线合成兜底；自动剥离 markdown、按句分段朗读，再点一次中断
 - **项目记忆与规则**：任务验收进 `done` 时摘要追加到主目录 `.taskpin/TASKBOARD_MEMORY.md` 并落库 `memories` 索引表；执行 prompt 自动注入「最近 N 条全文 + BM25 检索命中（含时间衰减）」，更多历史用 `taskctl memory search` 检索；超出最近 50 条的旧记忆折叠归档到 `.taskpin/TASKBOARD_MEMORY.archive.md`。跨任务规则可沉淀到 `.taskpin/TASKBOARD_RULES.md`，执行和问答都会先读
 - **任务标签**：任务可挂多个标签（明细抽屉维护，≤8 个/单个 ≤20 字符），卡片标题下方以胶带风胶囊展示
+- **待验收未查看标记**：「待验收」列新交付、还没打开看过的卡片带金色标记（绿底泛金渐变 + 金图钉 + 「● 待查看」胶囊），打开详情即恢复纯绿；任务再有更新（如打回重做后重新交付）会重新亮起。已查看状态存服务端，手机/PC 各端一致、实时同步
 - **多项目**：每个项目可配多个仓库路径（查找范围）和一个主目录（工作目录）；顶栏项目筛选支持多选（checkbox 面板，选中态本地持久化），「全部项目」总览视图
 - **手机可用**：移动端纵向手风琴布局 + 按钮操作，不依赖拖拽；内置 cloudflared 隧道管理，一键把看板暴露到公网
 - **自定义提示词**：执行（新会话/续跑）、问答、融合四个模板都可在设置页查看、修改、恢复默认
@@ -233,7 +234,7 @@ node server/index.mjs
 | POST | `/api/tasks` | 新建任务（只能落 `backlog`/`todo`） |
 | GET/PATCH/DELETE | `/api/tasks/:id` | 详情（含评论；`?compact=1` 折叠评论省 token，同 `taskctl show --compact`）/ 更新（乐观锁 `version`）/ 删除（仅已取消） |
 | POST | `/api/tasks/batch-delete {ids}` | 批量删除（事务） |
-| POST | `/api/tasks/merge {ids, agent?}` | 合并融合第一步：校验（2~5 个、同项目、非已取消/进行中）建 backlog 融合草案（`merged_from` 记录源任务 id+version），自动以 merge 模式发起融合执行并把草案认领进「进行中」（启动失败不阻断，响应带 `run_error`） |
+| POST | `/api/tasks/merge {ids, agent?}` | 合并融合第一步：校验（2~5 个、非已取消/进行中；允许跨项目，草案落第一个源任务的项目）建 backlog 融合草案（`merged_from` 记录源任务 id+version），自动以 merge 模式发起融合执行并把草案认领进「进行中」（启动失败不阻断，响应带 `run_error`） |
 | POST | `/api/tasks/:id/merge-confirm` | 显式确认生效：源任务 version 未变（变了 409 过期）→ 同事务全部置已取消 + 互链评论，草案 `merged_from` 清空；对草案发起 execute 执行时也会隐式确认 |
 | POST | `/api/tasks/:id/merge-cancel` | 显式放弃：草案置已取消，源任务不受影响；任意入口把草案置 `canceled` 都会触发同样的放弃语义 |
 | POST | `/api/tasks/:id/claim` | 原子认领 |
@@ -241,13 +242,14 @@ node server/index.mjs
 | GET | `/api/attachments/:taskId/:file` | 评论附件（图片 inline；文件强制下载并回显原始文件名） |
 | POST | `/api/tasks/:id/execute` | 拉起 Agent（`agent, mode?: execute\|qa\|merge, model?, effort?, permission?`；qa 仅待规划/待办/阻塞，merge 仅融合草案、与 execute 同流转进「进行中」；execute 打在融合草案上 = 隐式确认合并） |
 | GET | `/api/runs` · DELETE `/api/tasks/:id/run` | 运行列表 / 停止执行 |
+| GET | `/api/review-seen` · POST `/api/tasks/:id/review-seen` | 「待验收」已查看状态（`{taskId: seen_at}`，服务端共享、所有设备一致）/ 打开查看后标记（任务再有更新即重新视为未查看） |
 | GET | `/api/tasks/:id/run/output` | 运行中任务的实时输出（未在运行返回 404） |
 | GET | `/api/agent-options` | 各 Agent 可选的模型/思考/权限（执行面板联动选项；模型读各家 CLI 本地配置） |
 | GET | `/api/quota?refresh=1` | 三家 Agent 额度/余额（60s 缓存，`refresh=1` 强制刷新） |
 | GET/PATCH | `/api/settings` | 全局设置（启用的 Agent、prompt 模板覆盖） |
 | GET | `/api/prompt-defaults` | 内置 prompt 模板 + 自动认领提示词 |
 | GET | `/api/tunnel` · POST `/api/tunnel/start\|stop\|restart` | 公网隧道状态与管理 |
-| GET | `/api/events` | SSE（只有 `{"type":"change"}` 一种事件） |
+| GET/POST | `/api/events` | SSE（只有 `{"type":"change"}` 和心跳 ping 两种事件；**前端走 POST**——cloudflared 快速隧道会缓冲 GET 的 SSE 到连接关闭才下发，POST 实时流式不受影响） |
 
 ## 开发
 

@@ -3,6 +3,7 @@ import {
   listProjects, createProject, updateProject, deleteProject, listTasks, getTaskWithComments,
   createTask, updateTask, claimTask, addComment, deleteTasks, getSettings, updateSettings,
   saveAttachments, mergeTasks, confirmMerge, cancelMerge, compactComments, DbError,
+  listReviewSeen, markReviewSeen,
   ATTACHMENT_MIME_EXT,
 } from './db.mjs';
 import { PROMPT_DEFAULTS, AUTO_CLAIM_PROMPT, getAgentOptions } from './runner.mjs';
@@ -69,7 +70,7 @@ function readBody(req) {
 
 export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir, quota, tts }) {
   return async function handleApi(req, res, url) {
-    const m = url.pathname.match(/^\/api\/tasks\/(\d+)(\/claim|\/comments|\/execute|\/run|\/run\/output|\/merge-confirm|\/merge-cancel)?$/);
+    const m = url.pathname.match(/^\/api\/tasks\/(\d+)(\/claim|\/comments|\/execute|\/run|\/run\/output|\/merge-confirm|\/merge-cancel|\/review-seen)?$/);
     const pm = url.pathname.match(/^\/api\/projects\/(\d+)$/);
     const am = url.pathname.match(/^\/api\/attachments\/(\d+)\/([\w.-]+)$/);
     try {
@@ -98,6 +99,10 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
       // runs
       if (req.method === 'GET' && url.pathname === '/api/runs') {
         return sendJson(res, 200, runner.list());
+      }
+      // 「待验收」未查看标记：已查看状态 {taskId: seen_at}，服务端共享给所有设备
+      if (req.method === 'GET' && url.pathname === '/api/review-seen') {
+        return sendJson(res, 200, listReviewSeen(db));
       }
       // 三家 Agent 的额度/余额（quota.mjs 本机读凭证查询，元数据接口不耗 token，60s 缓存）
       if (req.method === 'GET' && url.pathname === '/api/quota') {
@@ -220,7 +225,7 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
         return sendJson(res, 200, result);
       }
 
-      // 合并融合第一步（出草案）：校验（2~5 个、同项目、非已取消/进行中）→ 建 backlog 草案（merged_from
+      // 合并融合第一步（出草案）：校验（2~5 个、非已取消/进行中；允许跨项目，草案落第一个源任务的项目）→ 建 backlog 草案（merged_from
       // 记录源任务 id+version）→ 自动以 merge 模式发起融合执行（会把草案认领进「进行中」）。执行启动失败
       // 不阻断（草案已建好，可稍后从详情抽屉手动执行）；run 为 null 时前端据此提示手动发起。
       if (req.method === 'POST' && url.pathname === '/api/tasks/merge') {
@@ -287,6 +292,11 @@ export function createApiHandler({ db, broadcast, runner, tunnel, attachmentsDir
             return sendJson(res, 404, { error: { code: 'NOT_FOUND', message: `task ${id} has no running agent` } });
           }
           return sendJson(res, 200, out);
+        }
+        if (req.method === 'POST' && sub === '/review-seen') {
+          const seen = markReviewSeen(db, id);
+          broadcast(); // 其它设备（手机/PC）经 SSE 同步摘掉未查看标记
+          return sendJson(res, 200, seen);
         }
         if (req.method === 'POST' && sub === '/comments') {
           const body = await readBody(req);

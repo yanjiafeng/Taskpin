@@ -482,7 +482,7 @@ test('parseUsage：codex / reasonix / dsh 输出解析，kimi 与无用量输出
   assert.equal(parseUsage('dsh', 'dsh-usage: 坏JSON'), null);
 });
 
-test('mergeTasks：校验（数量/同项目/状态）+ 建 backlog 草案（merged_from 记录 version，优先级取最高、标签取并集）', () => {
+test('mergeTasks：校验（数量/状态）+ 建 backlog 草案（merged_from 记录 version，优先级取最高、标签取并集；允许跨项目）', () => {
   const db = freshDb();
   const p = ensureDefaultProject(db);
   // done 会写项目记忆，主目录隔离到临时目录
@@ -498,9 +498,11 @@ test('mergeTasks：校验（数量/同项目/状态）+ 建 backlog 草案（mer
   // 非整数 / 不存在
   assert.throws(() => mergeTasks(db, [a.id, 'x']), (e) => e.code === 'VALIDATION');
   assert.throws(() => mergeTasks(db, [a.id, 999]), (e) => e.code === 'NOT_FOUND');
-  // 跨项目拒绝
+  // 跨项目允许合并：草案落第一个源任务的项目
   const other = createTask(db, { projectId: p2.id, title: 'X' });
-  assert.throws(() => mergeTasks(db, [a.id, other.id]), (e) => e.code === 'VALIDATION');
+  const crossDraft = mergeTasks(db, [a.id, other.id]);
+  assert.equal(crossDraft.project_id, p.id);
+  cancelMerge(db, crossDraft.id);
   // 已取消 / 进行中拒绝
   const canceled = updateTask(db, mk().id, { version: 1, status: 'canceled' });
   assert.throws(() => mergeTasks(db, [a.id, canceled.id]), (e) => e.code === 'INVALID_TRANSITION');

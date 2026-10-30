@@ -87,11 +87,13 @@ export function getAgentOptions() {
   };
 }
 
-// 从 CLI 输出中识别会话 id（输出滚动截断，必须边收边解析）
+// 从 CLI 输出中识别会话 id（输出滚动截断，必须边收边解析）。取最后一处匹配而非首处：
+// kimi 的 "To resume this session" 横幅在进程末尾才打印，而输出里可能混入 agent 引用
+// 看板旧评论（runner 评论尾部含 resume 行）的同类行——首匹配会把别的任务的会话 id 误存到本任务
 const SESSION_PATTERNS = {
-  codex: /session id: ([0-9a-f-]{36})/,
-  kimi: /kimi -r (session_[0-9a-f-]+)/,
-  reasonix: /"session_id":"([^"]+)"/, // stream-json 事件流末尾的 {"type":"result"} 结果行
+  codex: /session id: ([0-9a-f-]{36})/g,
+  kimi: /kimi -r (session_[0-9a-f-]+)/g,
+  reasonix: /"session_id":"([^"]+)"/g, // stream-json 事件流末尾的 {"type":"result"} 结果行
   // dsh headless 只在结束时打印最终 assistant 文本，无会话 id 可解析 → 不支持续跑
 };
 
@@ -423,6 +425,21 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
     if (task.status === 'done' || task.status === 'canceled') {
       throw new DbError('INVALID_TRANSITION', `task ${taskId} is ${task.status}`);
     }
+    // thread_id 存 "<agent>:<sessionId>"；同 agent 再执行续跑原会话，跨 agent 开新会话、靠评论继承任务记忆
+    const [threadAgent, ...threadRest] = (task.thread_id || '').split(':');
+    const resumeId = threadAgent === agent && threadRest.length
+      ? threadRest.join(':')
+      : null;
+    // 同一 CLI 会话同一时刻只能一个进程占用（kimi 锁冲突会秒退码 4）：续跑目标若正被本 runner
+    // 另一个活跃执行持有（r.resumeId 是其续跑目标，r.sessionId 是已解析出的会话），
+    // 直接 409 指明占用方，不要拉起进程白死一轮（须在下面认领/流转之前拦截，避免留下残留）
+    if (resumeId) {
+      for (const r of runs.values()) {
+        if (r.agent === agent && (r.resumeId === resumeId || r.sessionId === resumeId)) {
+          throw new DbError('RUN_IN_PROGRESS', `task ${taskId} 的续跑会话正被任务 #${r.task_id} 的 ${agent} 执行占用（${resumeId}），等其结束或先停止任务 #${r.task_id}`);
+        }
+      }
+    }
     if (execMode === 'qa') {
       // 问答只允许在 待规划/待办/阻塞 发起；状态保持不动（不占「进行中」）
       if (!['backlog', 'todo', 'blocked'].includes(task.status)) {
@@ -453,11 +470,6 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
         task = getTask(db, taskId);
       }
     }
-    // thread_id 存 "<agent>:<sessionId>"；同 agent 再执行续跑原会话，跨 agent 开新会话、靠评论继承任务记忆
-    const [threadAgent, ...threadRest] = (task.thread_id || '').split(':');
-    const resumeId = threadAgent === agent && threadRest.length
-      ? threadRest.join(':')
-      : null;
     // 上面的认领/流转已把任务置「进行中」：此处再构造命令/建主目录/spawn，若同步失败
     // （如主目录创建被拒、命令构造异常），回滚认领——否则会留下「进行中」但无活跃 run 的
     // 残留任务（卡片无执行中样式却停在进行中列）
@@ -489,7 +501,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
       throw err;
     }
     const mode = [execMode === 'qa' ? '问答' : execMode === 'merge' ? '融合' : null, options.model, options.effort, options.permission, resumeId ? '续跑' : null].filter(Boolean).join(' · ');
-    const run = { task_id: taskId, agent, mode, pid: proc.pid, started_at: new Date().toISOString(), proc, output: '', sessionId: null, stopping: false };
+    const run = { task_id: taskId, agent, mode, pid: proc.pid, started_at: new Date().toISOString(), proc, output: '', sessionId: null, resumeId, stopping: false };
     runs.set(taskId, run);
     // 残留进程超时自动回收（execute/merge 模式）：任务已离开「进行中」（交付待验收/提问进阻塞等）
     // 但进程迟迟不退（kimi 长会话挂死实测 22h，#83）——宽限 reapGraceMs 后按用户手动停止同等
@@ -526,10 +538,13 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
     } catch { /* 任务可能已被删除 */ }
     const onData = (d) => {
       run.output = (run.output + d).slice(-OUTPUT_CAP);
-      if (!run.sessionId) {
-        const m = SESSION_PATTERNS[agent]?.exec(run.output);
-        if (m) run.sessionId = m[1];
-      }
+      // 每块都重扫并取最后一处匹配（见 SESSION_PATTERNS 注释）：末尾的横幅才是本进程自己的会话
+      const re = SESSION_PATTERNS[agent];
+      if (!re) return;
+      re.lastIndex = 0;
+      let m, last = null;
+      while ((m = re.exec(run.output))) last = m;
+      if (last) run.sessionId = last[1];
     };
     proc.stdout?.on('data', onData);
     proc.stderr?.on('data', onData);

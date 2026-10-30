@@ -517,6 +517,8 @@ test('execute：启动、查重、停止、退出写评论', async () => {
     const ksid = 'session_3e124846-d732-43c4-9ff5-f9c835778467';
     await rq('POST', `/api/tasks/${t3id}/execute`, { agent: 'kimi' });
     assert.ok(!procs[6].args.includes('-S')); // kimi 不续 codex 的会话
+    // 输出里混入 agent 引用旧评论的 resume 行时，必须取最后一处匹配（首匹配会把别的任务的会话 id 误存到本任务）
+    procs[6].proc.stdout.emit('data', Buffer.from(`旧评论引用：To resume this session: kimi -r session_deadc0de-0000-0000-0000-00000000ffff\n`));
     procs[6].proc.stdout.emit('data', Buffer.from(`To resume this session: kimi -r ${ksid}\n`));
     procs[6].proc.emit('exit', 0);
     const afterK = await rq('GET', `/api/tasks/${t3id}`);
@@ -746,6 +748,73 @@ test('残留「进行中」回收：启动时无活跃 run 的 in_progress 自�
   } finally {
     srv.close();
     rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('execute：续跑会话被另一任务的活跃执行占用时 409（不流转、不留残留）', async () => {
+  const { EventEmitter } = await import('node:events');
+  const procs = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    const p = new EventEmitter();
+    p.pid = 70000 + procs.length;
+    p.stdout = new EventEmitter();
+    p.stderr = new EventEmitter();
+    p.kill = () => { p.emit('exit', 143); };
+    procs.push({ proc: p, cmd, args, opts });
+    return p;
+  };
+  const app = createApp({ dbPath: ':memory:', spawnFn: fakeSpawn });
+  const srv = app.server;
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  const rq = async (method, path, body) => {
+    const res = await fetch(b + path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  try {
+    const tmpMain = mkdtempSync(join(tmpdir(), 'tb-lock-'));
+    await rq('PATCH', '/api/projects/1', { main_dir: tmpMain });
+    const ksid = 'session_83a90dc3-0735-42d3-8eaf-f93770db7bc9';
+
+    // 两个任务都指向同一 kimi 会话（复刻 #231/#232 共享 thread_id 的场景）
+    const mkLocked = async (title) => {
+      const t = await rq('POST', '/api/tasks', { project_id: 1, title });
+      const id = t.data.id;
+      await rq('POST', `/api/tasks/${id}/execute`, { agent: 'kimi' });
+      const p = procs[procs.length - 1];
+      p.proc.stdout.emit('data', Buffer.from(`To resume this session: kimi -r ${ksid}\n`));
+      p.proc.emit('exit', 0);
+      return id;
+    };
+    const aid = await mkLocked('任务A');
+    const bid = await mkLocked('任务B');
+    assert.equal((await rq('GET', `/api/tasks/${bid}`)).data.thread_id, `kimi:${ksid}`);
+
+    // A 发起续跑并保持运行（占用会话）
+    await rq('POST', `/api/tasks/${aid}/execute`, { agent: 'kimi' });
+    const aResume = procs[procs.length - 1];
+    assert.ok(aResume.args.includes('-S') && aResume.args.includes(ksid));
+
+    // B 此时执行 → 409 指明占用方；预检在认领/流转之前，任务状态不动、不留残留
+    const conflict = await rq('POST', `/api/tasks/${bid}/execute`, { agent: 'kimi' });
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.data.error.code, 'RUN_IN_PROGRESS');
+    assert.ok(conflict.data.error.message.includes(`#${aid}`));
+    assert.equal((await rq('GET', `/api/tasks/${bid}`)).data.status, 'backlog');
+    assert.equal((await rq('GET', '/api/runs')).data.length, 1); // 只有 A 的 run
+
+    // A 退出释放会话后，B 可以正常续跑
+    aResume.proc.emit('exit', 0);
+    const ok = await rq('POST', `/api/tasks/${bid}/execute`, { agent: 'kimi' });
+    assert.equal(ok.status, 202);
+    procs[procs.length - 1].proc.emit('exit', 0);
+    rmSync(tmpMain, { recursive: true, force: true });
+  } finally {
+    srv.close();
   }
 });
 
@@ -1302,4 +1371,46 @@ test('续跑瘦身：同 agent 续跑的 prompt 不注入项目记忆，新会�
   } finally {
     srv.close();
   }
+});
+
+test('待验收未查看标记：review-seen 服务端共享状态', async () => {
+  const { data: projects } = await req('GET', '/api/projects');
+  const created = await req('POST', '/api/tasks', { project_id: projects[0].id, title: '未查看标记' });
+  assert.equal(created.status, 201);
+  const task = created.data;
+
+  // 初始为空
+  const before = await req('GET', '/api/review-seen');
+  assert.equal(before.status, 200);
+  assert.equal(before.data[String(task.id)], undefined);
+
+  // 不存在的任务 → 404
+  const missing = await req('POST', '/api/tasks/999999/review-seen');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.data.error.code, 'NOT_FOUND');
+
+  // 标记后可读到 seen_at，重复标记刷新时间
+  const mark1 = await req('POST', `/api/tasks/${task.id}/review-seen`);
+  assert.equal(mark1.status, 200);
+  assert.equal(mark1.data.task_id, task.id);
+  assert.ok(mark1.data.seen_at);
+  const after1 = await req('GET', '/api/review-seen');
+  assert.equal(after1.data[String(task.id)], mark1.data.seen_at);
+  const mark2 = await req('POST', `/api/tasks/${task.id}/review-seen`);
+  assert.equal(mark2.status, 200);
+  assert.ok(Date.parse(mark2.data.seen_at) >= Date.parse(mark1.data.seen_at));
+});
+
+test('SSE /api/events 支持 POST 且即时下发（cloudflared 快速隧道会缓冲 GET 的 SSE，前端改走 POST）', async () => {
+  const ac = new AbortController();
+  const res = await fetch(base + '/api/events', { method: 'POST', signal: ac.signal });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') || '', /text\/event-stream/);
+  const reader = res.body.getReader();
+  const first = await Promise.race([
+    reader.read(),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('首帧 3s 内未到达')), 3000)),
+  ]);
+  assert.ok(new TextDecoder().decode(first.value).includes('retry:'));
+  ac.abort();
 });

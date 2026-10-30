@@ -79,6 +79,10 @@ export function openDb(dbPath = defaultDbPath()) {
       archived INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id, archived);
+    CREATE TABLE IF NOT EXISTS review_seen (
+      task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+      seen_at TEXT NOT NULL
+    );
   `);
   // 迁移：旧库的单 path 字段 -> paths JSON 数组
   const cols = db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
@@ -396,6 +400,26 @@ export function updateSettings(db, patch = {}) {
   return cur;
 }
 
+// ---------- 待验收「未查看」标记（review_seen 表） ----------
+// 已查看状态存服务端（task_id → 打开查看时刻 seen_at），所有设备共享一份、随 SSE 实时同步；
+// 任务 updated_at 晚于 seen_at（重新交付/有更新）即重新视为未查看
+
+export function listReviewSeen(db) {
+  return Object.fromEntries(
+    db.prepare('SELECT task_id, seen_at FROM review_seen').all().map((r) => [r.task_id, r.seen_at]),
+  );
+}
+
+export function markReviewSeen(db, taskId) {
+  const t = db.prepare('SELECT id FROM tasks WHERE id = ?').get(taskId);
+  if (!t) throw new DbError('NOT_FOUND', `task ${taskId} not found`);
+  const seenAt = now();
+  db.prepare(
+    'INSERT INTO review_seen (task_id, seen_at) VALUES (?, ?) ON CONFLICT(task_id) DO UPDATE SET seen_at = excluded.seen_at',
+  ).run(taskId, seenAt);
+  return { task_id: taskId, seen_at: seenAt };
+}
+
 // ---------- tasks ----------
 
 export function listTasks(db, { projectId, projectIds, status, includeCanceled = true } = {}) {
@@ -587,7 +611,7 @@ function parseMergedFrom(task) {
   try { return task.merged_from ? JSON.parse(task.merged_from) : null; } catch { return null; }
 }
 
-// 第一步（出草案）：校验源任务（2~5 个、同项目、状态可合并），创建 backlog 状态的融合草案任务。
+// 第一步（出草案）：校验源任务（2~5 个、状态可合并；允许跨项目，草案落第一个源任务的项目），创建 backlog 状态的融合草案任务。
 // 草案的 merged_from 记录各源任务当时的 version（确认时据此检测草案过期）；优先级取最高、标签取并集（≤8）。
 // 源任务在确认前保持原状，各写一条互链评论。
 export function mergeTasks(db, ids) {
@@ -601,10 +625,7 @@ export function mergeTasks(db, ids) {
   db.exec('BEGIN');
   try {
     const sources = uniq.map((id) => getTask(db, id));
-    const pid = sources[0].project_id;
-    if (sources.some((t) => t.project_id !== pid)) {
-      throw new DbError('VALIDATION', '只能合并同一项目下的任务');
-    }
+    const pid = sources[0].project_id; // 草案落第一个源任务的项目（允许跨项目合并）
     for (const t of sources) {
       if (!MERGEABLE_STATUSES.includes(t.status)) {
         throw new DbError('INVALID_TRANSITION', `任务 #${t.id} 是「${t.status}」，已取消/进行中的任务不能参与合并`, { current: t });
