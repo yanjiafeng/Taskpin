@@ -67,6 +67,15 @@
       <button id="theme-btn" class="btn ghost" title="切换主题">☀️ 切换为亮色</button>
     </section>
     <section class="settings-block">
+      <h2>完成通知</h2>
+      <div class="settings-hint">每次任务执行完成后向该 Webhook 推送一条文本消息（企业微信群机器人地址）。留空 = 不通知。</div>
+      <label class="prompt-label" for="notify-webhook">Webhook 地址</label>
+      <input id="notify-webhook" class="prompt-tpl" type="url" spellcheck="false" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…">
+      <div class="prompt-actions">
+        <button class="btn primary" id="notify-save">保存通知配置</button>
+      </div>
+    </section>
+    <section class="settings-block">
       <h2>执行提示词模板</h2>
       <div class="settings-hint">看板拉起 Agent 时使用的提示词。占位符：<code>{{task_id}}</code> <code>{{tctl}}</code> <code>{{project_name}}</code> <code>{{scope}}</code> <code>{{claim_step}}</code>（续跑模板只用前两个）。清空或点「恢复默认」回到内置版本。</div>
       <label class="prompt-label">新会话模板</label>

@@ -320,7 +320,19 @@ async function refreshRuns() {
 
 // ---------- 渲染 ----------
 function visibleTasks(status) {
-  return state.tasks.filter((t) => t.status === status);
+  const list = state.tasks.filter((t) => t.status === status);
+  // 「待验收」列排序：未查看（updated_at > seen_at，与卡片「● 待查看」同一口径）的排最上，
+  // 同组内按最近完成（updated_at）倒序，id 倒序兜底；其他列保持 id 升序
+  if (status === 'in_review') {
+    const unseen = (t) => {
+      const seenAt = state.reviewSeen[t.id];
+      return !seenAt || Date.parse(seenAt) < Date.parse(t.updated_at);
+    };
+    list.sort((a, b) => (unseen(b) - unseen(a))
+      || Date.parse(b.updated_at) - Date.parse(a.updated_at)
+      || b.id - a.id);
+  }
+  return list;
 }
 
 // 项目多选筛选控件：按钮显示摘要，面板内 checkbox 多选；「全部项目」= 清空选择
@@ -1683,6 +1695,7 @@ function openSettings() {
   renderSettingsProjects();
   syncAgentToggles();
   renderPromptSettings();
+  $('#notify-webhook').value = state.settings.notify_webhook || '';
   $('#board').classList.add('hidden');
   $('#settings-page').classList.remove('hidden');
 }
@@ -2171,6 +2184,18 @@ function init() {
       $('#prompt-qa').value = state.promptDefaults.qa;
       $('#prompt-merge').value = state.promptDefaults.merge;
       toast('已恢复内置模板');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+  // 完成通知 Webhook：留空 = 清除（不通知）
+  $('#notify-save').onclick = (e) => withLoading(e.currentTarget, async () => {
+    try {
+      state.settings = await api('/api/settings', {
+        method: 'PATCH',
+        body: { notify_webhook: $('#notify-webhook').value.trim() || null },
+      });
+      toast('通知配置已保存');
     } catch (err) {
       toast(err.message, 'error');
     }

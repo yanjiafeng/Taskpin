@@ -1,7 +1,7 @@
 // API 测试：真实 HTTP 请求走完整流程。
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.mjs';
@@ -326,6 +326,90 @@ test('settings：读取默认、局部更新、至少启用一个 Agent', async 
   assert.equal(okTpl.data.prompt_new, '自定义 {{task_id}} 用 {{tctl}} 完成');
   const clearedTpl = await req('PATCH', '/api/settings', { prompt_new: null });
   assert.equal(clearedTpl.data.prompt_new, null); // 恢复内置默认
+
+  // 完成通知 webhook：默认 null；非法 URL -> 400；合法保存；null 清除
+  const defHook = await req('GET', '/api/settings');
+  assert.equal(defHook.data.notify_webhook, null);
+  const badHook = await req('PATCH', '/api/settings', { notify_webhook: 'not-a-url' });
+  assert.equal(badHook.status, 400);
+  const okHook = await req('PATCH', '/api/settings', { notify_webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc' });
+  assert.equal(okHook.status, 200);
+  assert.equal(okHook.data.notify_webhook, 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc');
+  const clearedHook = await req('PATCH', '/api/settings', { notify_webhook: null });
+  assert.equal(clearedHook.data.notify_webhook, null);
+});
+
+test('执行完成通知：进程退出后向配置的 webhook POST 文本消息', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { createServer } = await import('node:http');
+  const procs = [];
+  const fakeSpawn = (cmd, args, opts) => {
+    const p = new EventEmitter();
+    p.pid = 50000 + procs.length;
+    p.stdout = new EventEmitter();
+    p.stderr = new EventEmitter();
+    p.kill = () => { p.killed = true; p.emit('exit', 143); };
+    procs.push({ proc: p, cmd, args, opts });
+    return p;
+  };
+  // 本地 webhook 接收端，记录收到的消息体
+  const received = [];
+  const hookSrv = createServer((rq2, rs) => {
+    let body = '';
+    rq2.on('data', (c) => { body += c; });
+    rq2.on('end', () => { received.push(JSON.parse(body)); rs.end('{"errcode":0}'); });
+  });
+  await new Promise((r) => hookSrv.listen(0, '127.0.0.1', r));
+  const hookUrl = `http://127.0.0.1:${hookSrv.address().port}/webhook`;
+
+  const app = createApp({ dbPath: ':memory:', spawnFn: fakeSpawn });
+  const srv = app.server;
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  const rq = async (method, path, body) => {
+    const res = await fetch(b + path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  try {
+    const tmpMain = mkdtempSync(join(tmpdir(), 'tb-notify-'));
+    await rq('PATCH', '/api/projects/1', { main_dir: tmpMain });
+
+    // 未配置 webhook：执行完成不发送任何通知
+    const t1 = await rq('POST', '/api/tasks', { project_id: 1, title: '无通知任务' });
+    await rq('POST', `/api/tasks/${t1.data.id}/execute`, { agent: 'codex' });
+    procs[0].proc.emit('exit', 0);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(received.length, 0);
+
+    // 配置 webhook：执行完成后收到企业微信格式的文本消息
+    await rq('PATCH', '/api/settings', { notify_webhook: hookUrl });
+    const t2 = await rq('POST', '/api/tasks', { project_id: 1, title: '有通知任务' });
+    await rq('POST', `/api/tasks/${t2.data.id}/execute`, { agent: 'codex' });
+    procs[1].proc.stdout.emit('data', '做完了，结果一切正常');
+    procs[1].proc.emit('exit', 0);
+    for (let i = 0; i < 50 && received.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 1);
+    assert.equal(received[0].msgtype, 'text');
+    assert.ok(received[0].text.content.includes(`#${t2.data.id}`));
+    assert.ok(received[0].text.content.includes('有通知任务'));
+    assert.ok(received[0].text.content.includes('正常结束'));
+    assert.ok(received[0].text.content.includes('做完了，结果一切正常'));
+
+    // 异常退出同样通知，状态文案带退出码
+    const t3 = await rq('POST', '/api/tasks', { project_id: 1, title: '失败任务' });
+    await rq('POST', `/api/tasks/${t3.data.id}/execute`, { agent: 'codex' });
+    procs[2].proc.emit('exit', 2);
+    for (let i = 0; i < 50 && received.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.length, 2);
+    assert.ok(received[1].text.content.includes('异常退出（码 2）'));
+  } finally {
+    srv.close();
+    hookSrv.close();
+  }
 });
 
 test('agent-options：各 agent 的模型/思考/权限由后端下发（模型读各家 CLI 本地配置）', async () => {
@@ -1413,4 +1497,124 @@ test('SSE /api/events 支持 POST 且即时下发（cloudflared 快速隧道会�
   ]);
   assert.ok(new TextDecoder().decode(first.value).includes('retry:'));
   ac.abort();
+});
+
+test('execute：kimi 上下文压缩护栏——警告阈值写评论、停止阈值自动停止置 blocked、设置页可关', async () => {
+  const { EventEmitter } = await import('node:events');
+  const procs = [];
+  const fakeSpawn = (cmd, args) => {
+    const p = new EventEmitter();
+    p.pid = 70000 + procs.length;
+    p.stdout = new EventEmitter();
+    p.stderr = new EventEmitter();
+    p.kill = () => { p.killed = true; p.emit('exit', 143); };
+    procs.push({ proc: p, cmd, args });
+    return p;
+  };
+  // 伪造 kimi home：会话目录 state.json（cwd=主目录、createdAt=现在）+ logs/kimi-code.log
+  const tmpMain = mkdtempSync(join(tmpdir(), 'tb-cg-main-'));
+  const kimiHome = mkdtempSync(join(tmpdir(), 'tb-cg-kimi-'));
+  const sessionDir = join(kimiHome, 'sessions', 'wd_test_1', 'session_aaa');
+  mkdirSync(join(sessionDir, 'logs'), { recursive: true });
+  writeFileSync(join(sessionDir, 'state.json'), JSON.stringify({ cwd: tmpMain, createdAt: Date.now() }));
+  const logPath = join(sessionDir, 'logs', 'kimi-code.log');
+  writeFileSync(logPath, '');
+  let compactionCount = 0;
+  const addCompaction = () => {
+    compactionCount++;
+    appendFileSync(logPath, `2026-11-06T00:00:0${compactionCount}.000Z INFO  llm request  droppedCount=0 requestKind=full_compaction\n`);
+  };
+
+  const app = createApp({ dbPath: ':memory:', spawnFn: fakeSpawn, compactionPollMs: 20, kimiHome });
+  const srv = app.server;
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${srv.address().port}`;
+  const rq = async (method, path, body) => {
+    const res = await fetch(b + path, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+  const waitFor = async (fn, ms = 3000) => {
+    const t0 = Date.now();
+    for (;;) {
+      if (await fn()) return;
+      if (Date.now() - t0 > ms) throw new Error('waitFor 超时');
+      await new Promise((r) => setTimeout(r, 15));
+    }
+  };
+  try {
+    await rq('PATCH', '/api/projects/1', { main_dir: tmpMain });
+    const created = await rq('POST', '/api/tasks', { project_id: 1, title: '压缩护栏' });
+    const tid = created.data.id;
+    await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'kimi' });
+
+    // 1 次压缩（低于警告阈值 2）：无评论、不停止
+    addCompaction();
+    await new Promise((r) => setTimeout(r, 150));
+    let detail = await rq('GET', `/api/tasks/${tid}`);
+    assert.ok(!detail.data.comments.some((c) => c.body.includes('自动压缩')), '未达警告阈值不应写评论');
+    assert.ok(!procs[0].proc.killed);
+
+    // 第 2 次（警告阈值）：写 system 预警评论，进程继续跑
+    addCompaction();
+    await waitFor(async () => (await rq('GET', `/api/tasks/${tid}`)).data.comments.some((c) => c.body.includes('已自动压缩 2 次')));
+    assert.ok(!procs[0].proc.killed);
+    detail = await rq('GET', `/api/tasks/${tid}`);
+    assert.equal(detail.data.status, 'in_progress');
+    assert.equal(detail.data.comments.find((c) => c.body.includes('已自动压缩 2 次')).author, 'system');
+
+    // 第 3 次（停止阈值）：SIGTERM + 任务置 blocked + 系统评论；自动停止不打「异常退出」标记
+    addCompaction();
+    await waitFor(() => procs[0].proc.killed);
+    detail = await rq('GET', `/api/tasks/${tid}`);
+    assert.equal(detail.data.status, 'blocked');
+    assert.ok(detail.data.comments.some((c) => c.author === 'system' && c.body.includes('达到停止阈值')));
+    assert.ok(detail.data.comments.some((c) => c.body.includes('[runner] kimi 已停止（SIGTERM）')));
+    assert.equal(detail.data.last_run, null);
+
+    // 设置页关闭护栏：继续压缩也不停
+    const off = await rq('PATCH', '/api/settings', { compaction_guard: { enabled: false } });
+    assert.equal(off.status, 200);
+    await rq('PATCH', `/api/tasks/${tid}`, { version: detail.data.version, status: 'todo' });
+    await rq('POST', `/api/tasks/${tid}/execute`, { agent: 'kimi' });
+    addCompaction();
+    addCompaction();
+    await new Promise((r) => setTimeout(r, 150));
+    assert.ok(!procs[1].proc.killed, '护栏关闭后不应停止');
+    procs[1].proc.emit('exit', 0);
+
+    // 非法配置 400；传 null 恢复默认
+    const bad = await rq('PATCH', '/api/settings', { compaction_guard: { warn: 5, stop: 3 } });
+    assert.equal(bad.status, 400);
+    const reset = await rq('PATCH', '/api/settings', { compaction_guard: null });
+    assert.equal(reset.status, 200);
+    assert.equal(reset.data.compaction_guard, null);
+
+    // 续跑场景：会话日志已带 5 次历史压缩（上面两轮攒下的旧账）——历史不计入本轮，
+    // 历史超停止阈值只写一次性提示、不秒杀；本轮新增到 3 次才停
+    const t2 = await rq('POST', '/api/tasks', { project_id: 1, title: '续跑护栏' });
+    const t2id = t2.data.id;
+    await rq('PATCH', `/api/tasks/${t2id}`, { version: t2.data.version, thread_id: 'kimi:session_aaa' });
+    const ex2 = await rq('POST', `/api/tasks/${t2id}/execute`, { agent: 'kimi' });
+    assert.equal(ex2.status, 202);
+    assert.ok(procs[2].args.includes('-S') && procs[2].args.includes('session_aaa'), '应走 -S 续跑');
+    await waitFor(async () => (await rq('GET', `/api/tasks/${t2id}`)).data.comments.some((c) => c.body.includes('历史已累计压缩 5 次')));
+    await new Promise((r) => setTimeout(r, 100));
+    assert.ok(!procs[2].proc.killed, '历史压缩不应触发停止');
+    addCompaction();
+    addCompaction();
+    addCompaction();
+    await waitFor(() => procs[2].proc.killed);
+    const d2 = await rq('GET', `/api/tasks/${t2id}`);
+    assert.equal(d2.data.status, 'blocked');
+    assert.ok(d2.data.comments.some((c) => c.author === 'system' && c.body.includes('达到停止阈值')));
+
+    rmSync(tmpMain, { recursive: true, force: true });
+    rmSync(kimiHome, { recursive: true, force: true });
+  } finally {
+    srv.close();
+  }
 });

@@ -349,7 +349,10 @@ export const AGENT_NAMES = ['codex', 'kimi', 'reasonix', 'dsh'];
 // prompt_new/prompt_resume/prompt_qa：执行/问答 prompt 模板覆盖（null = 用 runner.mjs 的 PROMPT_DEFAULTS）
 // tunnel_url：最近一次 cloudflared 隧道域名（隧道断开后展示用，由 tunnel.mjs 写入）
 // access_token：访问 Token（null = 未设置；设置页可随机生成，改完即时生效；TASKBOARD_TOKEN 环境变量优先于它）
-const SETTING_DEFAULTS = () => ({ agents: [...AGENT_NAMES], prompt_new: null, prompt_resume: null, prompt_qa: null, prompt_merge: null, tunnel_url: null, access_token: null });
+// compaction_guard：kimi 会话上下文压缩护栏（null = runner.mjs 的 COMPACTION_GUARD_DEFAULT）：
+//   { enabled, warn, stop }——压缩 warn 次写预警评论、stop 次自动停止并把任务置 blocked（防摘要套摘要的质量漂移）
+// notify_webhook：任务执行完成通知的 Webhook 地址（企业微信群机器人，null = 不通知；runner 收尾时 POST 一条文本消息）
+const SETTING_DEFAULTS = () => ({ agents: [...AGENT_NAMES], prompt_new: null, prompt_resume: null, prompt_qa: null, prompt_merge: null, tunnel_url: null, access_token: null, compaction_guard: null, notify_webhook: null });
 const SETTING_KEYS = Object.keys(SETTING_DEFAULTS());
 const PROMPT_KEYS = ['prompt_new', 'prompt_resume', 'prompt_qa', 'prompt_merge'];
 
@@ -391,6 +394,23 @@ export function updateSettings(db, patch = {}) {
     if (key === 'access_token') {
       if (typeof value !== 'string' || !value.trim()) {
         throw new DbError('VALIDATION', 'access_token 必须是非空字符串（传 null 清除）');
+      }
+      value = value.trim();
+    }
+    if (key === 'compaction_guard') {
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new DbError('VALIDATION', 'compaction_guard 必须是对象 {enabled, warn, stop}（传 null 恢复默认）');
+      }
+      const g = { enabled: value.enabled ?? true, warn: value.warn ?? 2, stop: value.stop ?? 3 };
+      if (typeof g.enabled !== 'boolean' || !Number.isInteger(g.warn) || !Number.isInteger(g.stop) || g.warn < 1 || g.stop < 1) {
+        throw new DbError('VALIDATION', 'compaction_guard.enabled 必须是布尔值，warn/stop 必须是 ≥1 的整数');
+      }
+      if (g.warn >= g.stop) throw new DbError('VALIDATION', 'compaction_guard 要求 warn < stop');
+      value = g;
+    }
+    if (key === 'notify_webhook') {
+      if (typeof value !== 'string' || !/^https?:\/\/\S+$/.test(value.trim())) {
+        throw new DbError('VALIDATION', 'notify_webhook 必须是 http(s) URL（传 null 或空串清除）');
       }
       value = value.trim();
     }

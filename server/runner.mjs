@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getTask, updateTask, claimTask, addComment, setTaskThread, setTaskLastRun, setTaskUsage, setTaskExecOpts, listTasks, defaultDbPath, resolveMainDir, getSettings, recentMemories, searchMemories, confirmMerge, AGENT_NAMES, DbError } from './db.mjs';
+import { notifyTaskFinished } from './notify.mjs';
 
 export { AGENT_NAMES };
 
@@ -14,6 +15,58 @@ const TASKCTL = fileURLToPath(new URL('../cli/taskctl.mjs', import.meta.url));
 
 // 运行输出在内存中保留的尾部大小：抽屉里的终端式实时视图直接读这段缓冲
 const OUTPUT_CAP = 65536;
+
+// kimi 上下文压缩护栏默认值（设置页 compaction_guard 可覆盖）：压缩 warn 次写预警评论、
+// stop 次自动停止并置 blocked。压缩是「摘要的摘要」，次数越多编码质量越容易漂移（#263 实测
+// 2.4h 压了 6 次后回合中止）。检测通道：kimi -p 的 stdout 不打压缩事件，读会话日志
+// ~/.kimi-code/sessions/<工作区hash>/session_*/logs/kimi-code.log 里的 full_compaction 请求行
+export const COMPACTION_GUARD_DEFAULT = { enabled: true, warn: 2, stop: 3 };
+
+// 定位本次 kimi 执行对应的会话目录：续跑（-S）直接按会话 id 找；新会话按 state.json 的
+// cwd + createdAt 匹配（kimi 在进程启动时创建会话目录，首轮轮询可能还没出现，返回 null 下轮再试）
+function findKimiSessionDir(kimiHome, { cwd, sinceMs, resumeId }) {
+  const root = join(kimiHome, 'sessions');
+  if (resumeId) {
+    let ws;
+    try { ws = readdirSync(root); } catch { return null; }
+    for (const w of ws) {
+      const dir = join(root, w, resumeId);
+      if (existsSync(dir)) return dir;
+    }
+    return null;
+  }
+  let best = null;
+  let bestAt = 0;
+  let ws;
+  try { ws = readdirSync(root); } catch { return null; }
+  for (const w of ws) {
+    let sessions;
+    try { sessions = readdirSync(join(root, w)); } catch { continue; }
+    for (const s of sessions) {
+      if (!s.startsWith('session_')) continue;
+      const dir = join(root, w, s);
+      try {
+        const st = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
+        if (st.cwd === cwd && st.createdAt >= sinceMs - 5000 && st.createdAt > bestAt) {
+          best = dir;
+          bestAt = st.createdAt;
+        }
+      } catch { /* state.json 尚未写完或损坏，跳过 */ }
+    }
+  }
+  return best;
+}
+
+// 数会话日志里发生过几次全量压缩（每次压缩一行 llm request + 一行 response，只数 request 行）
+function countKimiCompactions(logPath) {
+  let text;
+  try { text = readFileSync(logPath, 'utf8'); } catch { return 0; } // 日志尚未创建
+  let n = 0;
+  for (const line of text.split('\n')) {
+    if (line.includes('llm request') && line.includes('requestKind=full_compaction')) n++;
+  }
+  return n;
+}
 
 export const EFFORTS = ['low', 'medium', 'high']; // 思考强度（codex / reasonix 生效）
 export const CODEX_SANDBOXES = ['read-only', 'workspace-write', 'danger-full-access'];
@@ -251,6 +304,7 @@ export const PROMPT_DEFAULTS = {
     '8. {{tctl}} update {{task_id}} --status in_review --if-version <当前 version>',
     '',
     '需要用户决策或信息不全时，不要猜测：comment（body 以 [提问] 开头，列出问题和可选方案）后 update --status blocked，等用户答复并重新执行你（会续跑本会话）。无法解决的硬阻塞同样 comment 说明后置 blocked。',
+    '里程碑落盘（铁律）：长任务每完成一个可独立验证的里程碑就 git commit 一次，并用 {{tctl}} comment {{task_id}} --author agent 写一条进度评论（已完成什么/下一步是什么）——执行可能被中断、或因上下文压缩超阈值被看板自动停止，未落盘的进度会丢失。',
     '禁止将任务置为 done（done 只能由用户验收）。',
     '沟通语言：所有写回看板的内容（评论、描述重写、[提问]）一律使用中文（代码、命令、标识符除外）。',
   ].join('\n'),
@@ -264,6 +318,7 @@ export const PROMPT_DEFAULTS = {
     '5. {{tctl}} update {{task_id}} --status in_review --if-version <当前 version>',
     '',
     '仍有需要用户决策的问题：comment（body 以 [提问] 开头，列出问题和可选方案）后 update --status blocked 等待答复，不要猜测。',
+    '里程碑落盘（铁律）：长任务每完成一个可独立验证的里程碑就 git commit 一次，并用 {{tctl}} comment {{task_id}} --author agent 写一条进度评论——执行可能被中断、或因上下文压缩超阈值被看板自动停止，未落盘的进度会丢失。',
     '禁止将任务置为 done（done 只能由用户验收）。',
     '沟通语言：所有写回看板的内容（评论、描述重写、[提问]）一律使用中文（代码、命令、标识符除外）。',
   ].join('\n'),
@@ -386,10 +441,10 @@ function buildPrompt(task, projectPaths, { resume, mode, templates, agent, memor
   return withMemory;
 }
 
-export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGraceMs = 10_000, reapPollMs = 2_000 } = {}) {
+export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGraceMs = 10_000, reapPollMs = 2_000, compactionPollMs = 30_000, kimiHome = join(homedir(), '.kimi-code') } = {}) {
   const runs = new Map(); // taskId -> {task_id, agent, pid, started_at, proc, output}
 
-  function publicRun({ proc, output, watcher, ...pub }) {
+  function publicRun({ proc, output, watcher, compactionWatcher, ...pub }) {
     return { ...pub, output_tail: output.trim().split('\n').slice(-5).join('\n') };
   }
 
@@ -401,7 +456,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
   function output(taskId) {
     const run = runs.get(taskId);
     if (!run) return null;
-    const { proc, watcher, ...pub } = run;
+    const { proc, watcher, compactionWatcher, ...pub } = run;
     return { ...pub };
   }
 
@@ -474,10 +529,12 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
     // （如主目录创建被拒、命令构造异常），回滚认领——否则会留下「进行中」但无活跃 run 的
     // 残留任务（卡片无执行中样式却停在进行中列）
     let proc;
+    let runCwd = null;
     try {
       const project = db.prepare('SELECT name, paths, main_dir FROM projects WHERE id = ?').get(task.project_id);
       const projectPaths = JSON.parse(project?.paths || '[]');
       const cwd = resolveMainDir(project); // 主目录作为工作目录；paths 仅作查找范围提示
+      runCwd = cwd;
       const dbDir = dirname(dbPath ?? defaultDbPath());
       const prompt = buildPrompt({ ...task, project_name: project?.name }, projectPaths, {
         resume: Boolean(resumeId),
@@ -503,6 +560,64 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
     const mode = [execMode === 'qa' ? '问答' : execMode === 'merge' ? '融合' : null, options.model, options.effort, options.permission, resumeId ? '续跑' : null].filter(Boolean).join(' · ');
     const run = { task_id: taskId, agent, mode, pid: proc.pid, started_at: new Date().toISOString(), proc, output: '', sessionId: null, resumeId, stopping: false };
     runs.set(taskId, run);
+    // kimi 上下文压缩护栏：会话日志里 full_compaction 每出现一次 = 上下文被「摘要的摘要」替换一轮，
+    // 编码质量随次数漂移。计数口径是**本轮执行的增量**——发现会话日志时先记基线（续跑会继承会话的
+    // 历史压缩记录，旧账不算进本轮，否则续跑上一轮压过头的会话会在首个轮询周期被秒杀）；历史已超
+    // 停止阈值的会话写一次性提示（摘要质量已有损耗，建议新会话）。warn 次写预警评论（不打扰执行），
+    // stop 次按手动停止同等语义 SIGTERM 并把任务置 blocked 等用户处置（不放回 backlog——自动认领
+    // 循环会原地打转）。其余 agent 的压缩信号各异，暂只覆盖 kimi
+    const guard = { ...COMPACTION_GUARD_DEFAULT, ...(settings.compaction_guard || {}) };
+    if (agent === 'kimi' && guard.enabled) {
+      const spawnedAt = Date.now();
+      let warned = false;
+      let historyNoted = false;
+      let sessionLog = null;
+      let baseline = 0;
+      const compactionWatcher = setInterval(() => {
+        if (run.stopping) return;
+        try {
+          if (!sessionLog) {
+            const dir = findKimiSessionDir(kimiHome, { cwd: runCwd, sinceMs: spawnedAt, resumeId });
+            if (!dir) return; // 会话目录尚未创建，下轮再试
+            sessionLog = join(dir, 'logs', 'kimi-code.log');
+            // 基线口径：续跑（resumeId）继承会话历史，以发现时的累计数为基线，旧账不算本轮；
+            // 新会话目录就是本进程创建的，里面的压缩必然全是本轮的，基线固定 0
+            // （不能按发现时的读数当基线——首轮轮询可能跑在第一次压缩之后，会把本轮压缩误当旧账）
+            baseline = resumeId ? countKimiCompactions(sessionLog) : 0;
+            if (resumeId && baseline >= guard.stop && !historyNoted) {
+              historyNoted = true;
+              try {
+                addComment(db, taskId, { author: 'system', body: `提示：本会话历史已累计压缩 ${baseline} 次（摘要质量已有损耗），本轮起重新计数、再压缩 ${guard.stop} 次将自动停止。若本轮仍跑不完，建议清掉 thread_id 开新会话执行，靠评论继承任务记忆` });
+              } catch { /* 任务可能已被删除 */ }
+              broadcast();
+            }
+          }
+          const n = Math.max(0, countKimiCompactions(sessionLog) - baseline); // 日志轮转会丢行，不为负
+          if (n >= guard.stop) {
+            run.stopping = true; // 自动停止等同手动停止：finish 不打「异常退出」标记
+            try {
+              const cur = getTask(db, taskId);
+              if (cur.status === 'in_progress') {
+                updateTask(db, taskId, { version: cur.version, status: 'blocked' });
+              }
+              addComment(db, taskId, { author: 'system', body: `本会话上下文已自动压缩 ${n} 次，达到停止阈值（${guard.stop} 次），已自动停止执行：压缩是「摘要的摘要」，继续跑编码质量会持续漂移。已完成的改动留在工作区（未提交部分请先检查）。建议把任务拆小后重新执行；或答复本评论触发续跑——续跑继承压缩摘要、上下文预算重置` });
+            } catch { /* 任务可能已被删除 */ }
+            run.proc.kill('SIGTERM'); // exit 事件触发 finish 清理
+            broadcast();
+            return;
+          }
+          if (n >= guard.warn && !warned) {
+            warned = true;
+            try {
+              addComment(db, taskId, { author: 'system', body: `本会话上下文已自动压缩 ${n} 次（警告阈值 ${guard.warn}，达到 ${guard.stop} 次将自动停止）：压缩是「摘要的摘要」，次数越多编码质量越容易漂移，建议尽快落盘当前里程碑并收尾交付` });
+            } catch { /* 任务可能已被删除 */ }
+            broadcast();
+          }
+        } catch { /* 单次轮询失败不影响执行 */ }
+      }, compactionPollMs);
+      compactionWatcher.unref?.();
+      run.compactionWatcher = compactionWatcher;
+    }
     // 残留进程超时自动回收（execute/merge 模式）：任务已离开「进行中」（交付待验收/提问进阻塞等）
     // 但进程迟迟不退（kimi 长会话挂死实测 22h，#83）——宽限 reapGraceMs 后按用户手动停止同等
     // 语义 SIGTERM（stopping=true，finish 不打「异常退出」标记）。qa 模式任务本就不进
@@ -559,6 +674,7 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
     if (!run) return;
     runs.delete(taskId);
     clearInterval(run.watcher); // 自动回收的轮询随 run 一并清理
+    clearInterval(run.compactionWatcher); // 压缩护栏的轮询一并清理
     // 记录 CLI 会话 id（带 agent 前缀），同 agent 打回重做时续跑
     if (run.sessionId) {
       // reasonix 的 --resume 要会话文件完整路径，按 session_id 定位；找不到就不存（靠评论继承）
@@ -612,6 +728,9 @@ export function createRunner({ db, broadcast, dbPath, spawnFn = spawn, reapGrace
         updateTask(db, taskId, { version: task.version, status: 'backlog' });
         addComment(db, taskId, { author: 'system', body: '执行进程已退出，任务回到「待规划」（可重新执行）' });
       }
+      // 执行完成通知（设置页 notify_webhook，企业微信机器人；发送失败只打日志不阻断收尾）
+      const { notify_webhook } = getSettings(db);
+      if (notify_webhook) notifyTaskFinished(notify_webhook, { task, agent: run.agent, status, secs, tail });
     } catch { /* 任务可能已被删除 */ }
     broadcast();
   }

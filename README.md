@@ -246,7 +246,7 @@ node server/index.mjs
 | GET | `/api/tasks/:id/run/output` | 运行中任务的实时输出（未在运行返回 404） |
 | GET | `/api/agent-options` | 各 Agent 可选的模型/思考/权限（执行面板联动选项；模型读各家 CLI 本地配置） |
 | GET | `/api/quota?refresh=1` | 三家 Agent 额度/余额（60s 缓存，`refresh=1` 强制刷新） |
-| GET/PATCH | `/api/settings` | 全局设置（启用的 Agent、prompt 模板覆盖） |
+| GET/PATCH | `/api/settings` | 全局设置（启用的 Agent、prompt 模板覆盖、`compaction_guard` kimi 上下文压缩护栏阈值、`notify_webhook` 执行完成通知地址） |
 | GET | `/api/prompt-defaults` | 内置 prompt 模板 + 自动认领提示词 |
 | GET | `/api/tunnel` · POST `/api/tunnel/start\|stop\|restart` | 公网隧道状态与管理 |
 | GET/POST | `/api/events` | SSE（只有 `{"type":"change"}` 和心跳 ping 两种事件；**前端走 POST**——cloudflared 快速隧道会缓冲 GET 的 SSE 到连接关闭才下发，POST 实时流式不受影响） |
